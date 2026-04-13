@@ -3,3 +3,4 @@ MOD_DB_PATH = "/Volumes/Workspace-new/projects/celeste-mod-manager/celeste_mod_d
 FORCE_UPDATE_DEFAULT = False
 DB_UPDATE_PERIOD_DAYS = 7
 MODS_DIR = "/Volumes/Workspace-new/projects/celeste-mod-manager/Mods"
+DEFAULT_LOG_LEVEL = "DEBUG"

@@ -31,16 +31,17 @@ class Mod:
     name: str
     version: str
 
-    def __init__(self, name: str, version: str):
+    def __init__(self, name: str, version: str, subdir: str = ""):
         self.name = name
         self.version = version
+        self.subdir = subdir
 
     # REVIEW: currently we initialize a Mod instance from a filename, but it
     # might be more robust to read the everest.yaml inside the zip to get
     # accurate metadata.
     @staticmethod
-    def from_filename(filename: str) -> Optional['Mod']:
-        filepath = os.path.join(MODS_DIR, filename)
+    def from_filename(filename: str, subdir: str = "") -> Optional['Mod']:
+        filepath = os.path.join(MODS_DIR, subdir, filename)
         if not os.path.exists(filepath):
             logger.error(f"File '{filepath}' does not exist.")
             return None
@@ -48,18 +49,21 @@ class Mod:
             name_version = filename[:-4].split('-', 1)
             if len(name_version) == 2:
                 name, version = name_version
-                return Mod(name=name, version=version)
+                return Mod(name=name, version=version, subdir=subdir)
         logger.error(f"Filename '{filename}' does not match expected format 'Name-Version.zip'.")
         return None
 
     def get_filename(self) -> str:
         return f"{self.name}-{self.version}.zip"
 
+    def get_filepath(self) -> str:
+        return os.path.join(MODS_DIR, self.subdir, self.get_filename())
+
     def __repr__(self):
-        return f"Mod(name='{self.name}', version='{self.version}')"
+        return f"Mod(name='{self.name}', version='{self.version}', subdir='{self.subdir}')"
 
     def load_everest_yaml(self) -> Optional[dict]:
-        mod_file = self.get_filename()
+        mod_file = self.get_filepath()
         return load_mod_cfg(mod_file)
 
     def get_mod_deps(self, optional: bool = False) -> List[dict[str, str]]:

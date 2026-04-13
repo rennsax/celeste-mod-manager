@@ -1,5 +1,7 @@
 import sys
+from loguru import logger
 
+from .config import DEFAULT_LOG_LEVEL
 from .cli import CelesteModCLI
 
 cli = CelesteModCLI()
@@ -13,10 +15,13 @@ Commands:
     search             Search for mods in the mod database.
     list               List all installed mods.
     list-tree          List all installed mods and their dependencies in a tree format.
-    install            Install a mod by its exact name.\
+    install            Install some mod(s).\
 """, file=sys.stderr)
 
 def main():
+    logger.remove()
+    logger.add(sys.stderr, level=DEFAULT_LOG_LEVEL)
+
     cli = CelesteModCLI()
     # Dispatch
     args = sys.argv[1:]
@@ -33,9 +38,9 @@ def main():
     elif command == "list":
         cli.list(extra_args)
     elif command == "list-tree":
-        cli.list_tree(extra_args)
+        return(cli.list_tree(extra_args, prog_name=f"{sys.argv[0]} list-tree"))
     elif command == "install":
-        return(cli.install(extra_args))
+        return(cli.install(extra_args, prog_name=f"{sys.argv[0]} install"))
     else:
         print(f"ERROR: unknown command '{command}'", file=sys.stderr)
         print()

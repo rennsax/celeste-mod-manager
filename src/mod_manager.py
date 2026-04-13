@@ -12,13 +12,10 @@ def _download_mod(mod_info: ModInfo) -> Optional[Mod]:
     if not mod_info or not mod_info.submissionFile:
         logger.critical("Invalid mod info provided for download.")
         sys.exit(1)
+
     url = mod_info.submissionFile.url
     filename = f"{mod_info.name}-{mod_info.version}.zip"
     filepath = os.path.join(MODS_DIR, filename)
-
-    if os.path.exists(filepath):
-        logger.info(f"Mod '{filename}' already exists. Skipping download.")
-        return Mod(name=mod_info.name, version=mod_info.version)
 
     os.makedirs(MODS_DIR, exist_ok=True)
 
@@ -33,6 +30,24 @@ def _download_mod(mod_info: ModInfo) -> Optional[Mod]:
         if os.path.exists(filepath):
             os.remove(filepath)
         return None
+
+def get_installed_mods() -> List[Mod]:
+    if not os.path.exists(MODS_DIR):
+        return []
+    mods = []
+    files = [f for f in os.listdir(MODS_DIR) if f != "Cache"]
+    for filename in files:
+        if filename.endswith(".zip"):
+            mod = Mod.from_filename(filename)
+            if mod:
+                mods.append(mod)
+        elif os.path.isdir(os.path.join(MODS_DIR, filename)):
+            for sub_file in os.listdir(os.path.join(MODS_DIR, filename)):
+                if sub_file.endswith(".zip"):
+                    mod = Mod.from_filename(sub_file, subdir=filename)
+                    if mod:
+                        mods.append(mod)
+    return mods
 
 def resolve_deps(mod: Mod, optional: bool = False, _visited: Optional[set] = None) -> Tuple[List[Mod], List[str]]:
     if _visited is None:
@@ -60,25 +75,20 @@ def resolve_deps(mod: Mod, optional: bool = False, _visited: Optional[set] = Non
         if dep_name in _visited:
             continue
 
-        found_files = [f for f in os.listdir(MODS_DIR) if f.startswith(f"{dep_name}-") and f.endswith(".zip")]
+        installed_mods = get_installed_mods()
+        found_mods = [m for m in installed_mods if m.name == dep_name]
 
-        if len(found_files) > 1:
-            logger.error(f"Multiple files found for dependency '{dep_name}': {found_files}")
+        if len(found_mods) > 1:
+            logger.error(f"Multiple mods found for dependency '{dep_name}': {found_mods}")
             failed_deps.append(dep_name)
-        elif len(found_files) == 1:
-            filename = found_files[0]
-            dep_mod = Mod.from_filename(filename)
-            if not dep_mod:
-                logger.error(f"Failed to parse mod from filename '{filename}'.")
-                failed_deps.append(dep_name)
-                continue
-            if dep_mod and dep_mod.version != dep_version:
+        elif len(found_mods) == 1:
+            dep_mod = found_mods[0]
+            if dep_mod.version != dep_version:
                 logger.warning(f"Version mismatch for '{dep_name}': required {dep_version}, found {dep_mod.version}")
-            if dep_mod:
-                resolved_deps.append(dep_mod)
-                sub_resolved, sub_failed = resolve_deps(dep_mod, optional=optional, _visited=_visited)
-                resolved_deps.extend(sub_resolved)
-                failed_deps.extend(sub_failed)
+            resolved_deps.append(dep_mod)
+            sub_resolved, sub_failed = resolve_deps(dep_mod, optional=optional, _visited=_visited)
+            resolved_deps.extend(sub_resolved)
+            failed_deps.extend(sub_failed)
         else:
             logger.info(f"Dependency '{dep_name}' not found locally. Try to resolve...")
             mod_info = get_mod_info(dep_name)
@@ -100,17 +110,6 @@ def resolve_deps(mod: Mod, optional: bool = False, _visited: Optional[set] = Non
 
     return resolved_deps, failed_deps
 
-def get_installed_mods() -> List[Mod]:
-    if not os.path.exists(MODS_DIR):
-        return []
-    mods = []
-    for filename in os.listdir(MODS_DIR):
-        if filename.endswith(".zip"):
-            mod = Mod.from_filename(filename)
-            if mod:
-                mods.append(mod)
-    return mods
-
 def pretty_print_mods(mods: List[Mod]):
     if not mods or len(mods) == 0:
         print("No mods installed.")
@@ -126,7 +125,7 @@ def pretty_print_mods(mods: List[Mod]):
     for mod in mods:
         print(f"{mod.name:<{max_name_len}} {mod.version:<{max_version_len}}")
 
-def analyse_mod_deps(maxdepth: Optional[int] = None, optional: bool = False):
+def analyse_mod_deps(maxdepth: int, optional: bool = False):
     mods = get_installed_mods()
     if not mods:
         print("No mods installed.")
@@ -201,7 +200,7 @@ def analyse_mod_deps(maxdepth: Optional[int] = None, optional: bool = False):
             print(f"{prefix}{connector}{display_node}")
             new_prefix = prefix + ("    " if is_last else "│   ")
 
-        if maxdepth is not None and maxdepth != 0 and current_depth >= maxdepth:
+        if current_depth >= maxdepth:
             return
 
         children = sorted(graph.get(node, []), key=lambda x: x[0].lower())
@@ -213,3 +212,15 @@ def analyse_mod_deps(maxdepth: Optional[int] = None, optional: bool = False):
         print_tree(roots[i], is_root=True)
         if i < len(roots) - 1:
             print()
+
+def ensure_mod(mod_name: str) -> Optional[Mod]:
+    """Ensure the mod exists locally, if not, try to download it. Return the Mod instance if successful, or None if failed."""
+    mods = get_installed_mods()
+    for mod in mods:
+        if mod.name == mod_name:
+            return mod
+    mod_info = get_mod_info(mod_name)
+    if not mod_info:
+        logger.error(f"Mod '{mod_name}' not found in the database.")
+        return None
+    return _download_mod(mod_info)
