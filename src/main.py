@@ -8,7 +8,7 @@ cli = CelesteModCLI()
 
 def cmd_help():
     print(f"""\
-Usage: {sys.argv[0]} <command> [args]
+Usage: celeste-mod-manager <command> [args]
 
 Commands:
     help               Show this help message.
@@ -38,9 +38,9 @@ def main():
     elif command == "list":
         cli.list(extra_args)
     elif command == "list-tree":
-        return(cli.list_tree(extra_args, prog_name=f"{sys.argv[0]} list-tree"))
+        return(cli.list_tree(extra_args, prog_name=f"celeste-mod-manager list-tree"))
     elif command == "install":
-        return(cli.install(extra_args, prog_name=f"{sys.argv[0]} install"))
+        return(cli.install(extra_args, prog_name=f"celeste-mod-manager install"))
     else:
         print(f"ERROR: unknown command '{command}'", file=sys.stderr)
         print()

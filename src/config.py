@@ -32,7 +32,7 @@ if not _CELESTE_DIR or not _CELESTE_DIR.exists():
 WEGFAN_API_URL = "https://celeste.weg.fan/api/v2"
 FORCE_UPDATE_DEFAULT = False
 DB_UPDATE_PERIOD_DAYS = 7
-DEFAULT_LOG_LEVEL = "DEBUG"
+DEFAULT_LOG_LEVEL = "ERROR"
 MOD_DB_PATH = os.path.join(_CELESTE_DIR, "celeste_mod_db.json")
 MODS_DIR = os.path.join(_CELESTE_DIR, "Mods")
 
