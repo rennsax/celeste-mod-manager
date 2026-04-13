@@ -26,6 +26,7 @@ classifiers = [
 dependencies = [
     "pyyaml",
     "loguru",
+    "vdf",
 ]
 
 [project.scripts]
