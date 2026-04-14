@@ -1,23 +1,22 @@
 import os
 import sys
 import urllib.request
-from typing import Optional, List, Tuple
 from loguru import logger
 
-from .config import *
+from . import config
 from .mod import Mod
 from .mod_db import ModInfo, get_mod_info
 
-def _download_mod(mod_info: ModInfo) -> Optional[Mod]:
+def _download_mod(mod_info: ModInfo) -> Mod | None:
     if not mod_info or not mod_info.submissionFile:
         logger.critical("Invalid mod info provided for download.")
         sys.exit(1)
 
     url = mod_info.submissionFile.url
     filename = f"{mod_info.name}-{mod_info.version}.zip"
-    filepath = os.path.join(MODS_DIR, filename)
+    filepath = os.path.join(config.MODS_DIR, filename)
 
-    os.makedirs(MODS_DIR, exist_ok=True)
+    os.makedirs(config.MODS_DIR, exist_ok=True)
 
     logger.info(f"Downloading '{mod_info.name}' from '{url}'...")
     try:
@@ -31,25 +30,25 @@ def _download_mod(mod_info: ModInfo) -> Optional[Mod]:
             os.remove(filepath)
         return None
 
-def get_installed_mods() -> List[Mod]:
-    if not os.path.exists(MODS_DIR):
+def get_installed_mods() -> list[Mod]:
+    if not os.path.exists(config.MODS_DIR):
         return []
     mods = []
-    files = [f for f in os.listdir(MODS_DIR) if f != "Cache"]
+    files = [f for f in os.listdir(config.MODS_DIR) if f != "Cache"]
     for filename in files:
         if filename.endswith(".zip"):
             mod = Mod.from_filename(filename)
             if mod:
                 mods.append(mod)
-        elif os.path.isdir(os.path.join(MODS_DIR, filename)):
-            for sub_file in os.listdir(os.path.join(MODS_DIR, filename)):
+        elif os.path.isdir(os.path.join(config.MODS_DIR, filename)):
+            for sub_file in os.listdir(os.path.join(config.MODS_DIR, filename)):
                 if sub_file.endswith(".zip"):
                     mod = Mod.from_filename(sub_file, subdir=filename)
                     if mod:
                         mods.append(mod)
     return mods
 
-def resolve_deps(mod: Mod, optional: bool = False, _visited: Optional[set] = None) -> Tuple[List[Mod], List[str]]:
+def resolve_deps(mod: Mod, optional: bool = False, _visited: set | None = None) -> tuple[list[Mod], list[str]]:
     if _visited is None:
         _visited = set()
 
@@ -61,8 +60,8 @@ def resolve_deps(mod: Mod, optional: bool = False, _visited: Optional[set] = Non
     resolved_deps = []
     failed_deps = []
 
-    if not os.path.exists(MODS_DIR):
-        os.makedirs(MODS_DIR, exist_ok=True)
+    if not os.path.exists(config.MODS_DIR):
+        os.makedirs(config.MODS_DIR, exist_ok=True)
 
     for dep in deps:
         dep_name = dep['Name']
@@ -110,7 +109,7 @@ def resolve_deps(mod: Mod, optional: bool = False, _visited: Optional[set] = Non
 
     return resolved_deps, failed_deps
 
-def pretty_print_mods(mods: List[Mod]):
+def pretty_print_mods(mods: list[Mod]):
     if not mods or len(mods) == 0:
         print("No mods installed.")
         return
@@ -213,7 +212,7 @@ def analyse_mod_deps(maxdepth: int, optional: bool = False):
         if i < len(roots) - 1:
             print()
 
-def ensure_mod(mod_name: str) -> Optional[Mod]:
+def ensure_mod(mod_name: str) -> Mod | None:
     """Ensure the mod exists locally, if not, try to download it. Return the Mod instance if successful, or None if failed."""
     mods = get_installed_mods()
     for mod in mods:

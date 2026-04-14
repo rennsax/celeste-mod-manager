@@ -1,6 +1,6 @@
 import sys
 import os
-from typing import List, Sequence
+from typing import Sequence
 import optparse
 import textwrap
 from loguru import logger
@@ -73,7 +73,7 @@ class CelesteModCLI:
             print("ERROR: no mod specified to install.", file=sys.stderr)
             return 1
 
-        mods_to_install: List[str] = list()
+        mods_to_install: list[str] = list()
         if options.requirement:
             if not os.path.isfile(options.requirement):
                 print(f"ERROR: requirement file '{options.requirement}' not found.", file=sys.stderr)
@@ -101,7 +101,7 @@ class CelesteModCLI:
 
         return exit_code
 
-    def search(self, args: List[str]) -> None:
+    def search(self, args: list[str]) -> None:
         """Search for mods in the database and print their information."""
         pattern = args[0]
         found_mods = search_mod_in_db(lambda m: pattern.lower() in m.name.lower())
@@ -116,12 +116,12 @@ class CelesteModCLI:
             pretty_print_mod_info(mod)
             print("-" * 40)
 
-    def list(self, args: List[str]) -> None:
+    def list(self, args: list[str]) -> None:
         """List all installed mods."""
         mods = get_installed_mods()
         pretty_print_mods(mods)
 
-    def list_tree(self, args: List[str], prog_name: str = "celeste-mod-manager list-tree") -> int:
+    def list_tree(self, args: "list[str]", prog_name: str = "celeste-mod-manager list-tree") -> int:
         """List all installed mods and their dependencies in a tree format."""
         parser = optparse.OptionParser(
             prog=prog_name,

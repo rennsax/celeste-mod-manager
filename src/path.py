@@ -1,0 +1,24 @@
+
+import os
+import platform
+import sys
+from pathlib import Path
+from loguru import logger
+
+from .steam import steam_find_game
+from . import config
+
+
+def get_celeste_dir() -> Path | None:
+    celeste_dir = steam_find_game(504230)
+    if not celeste_dir:
+        return None
+    system = platform.system()
+    if system == "Windows" or system == "Linux":
+        return celeste_dir / "Mods"
+    elif system == "Darwin":  # macOS
+        return celeste_dir / "Celeste.app" / "Contents" / "Resources"
+
+def set_mod_paths(celeste_dir: Path):
+    config.MOD_DB_PATH = os.path.join(celeste_dir, "celeste_mod_db.json")
+    config.MODS_DIR = os.path.join(celeste_dir, "Mods")

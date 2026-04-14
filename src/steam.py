@@ -1,11 +1,9 @@
-import os
 import platform
 from pathlib import Path
-from typing import Optional
 import vdf
 
 
-def _get_steam_root() -> Optional[Path]:
+def _get_steam_root() -> Path | None:
     """
     Find Steam installation directory across platforms.
     Returns None if Steam is not found.
@@ -65,7 +63,7 @@ def _get_steam_root() -> Optional[Path]:
     return None
 
 
-def steam_find_game(app_id: int) -> Optional[Path]:
+def steam_find_game(app_id: int) -> Path | None:
     """
     Find the installation directory of a Steam game by its app ID.
 

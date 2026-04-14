@@ -2,13 +2,12 @@ import os
 import sys
 import yaml
 import zipfile
-from typing import Optional, List
 from loguru import logger
 
-from .config import *
+from . import config
 
-def load_mod_cfg(mod_file: str) -> Optional[dict]:
-    filepath = os.path.join(MODS_DIR, mod_file)
+def load_mod_cfg(mod_file: str) -> dict | None:
+    filepath = os.path.join(config.MODS_DIR, mod_file)
     if not os.path.exists(filepath):
         logger.error(f"Mod file '{mod_file}' not found.")
         return None
@@ -40,8 +39,8 @@ class Mod:
     # might be more robust to read the everest.yaml inside the zip to get
     # accurate metadata.
     @staticmethod
-    def from_filename(filename: str, subdir: str = "") -> Optional['Mod']:
-        filepath = os.path.join(MODS_DIR, subdir, filename)
+    def from_filename(filename: str, subdir: str = "") -> "Mod | None":
+        filepath = os.path.join(config.MODS_DIR, subdir, filename)
         if not os.path.exists(filepath):
             logger.error(f"File '{filepath}' does not exist.")
             return None
@@ -57,16 +56,16 @@ class Mod:
         return f"{self.name}-{self.version}.zip"
 
     def get_filepath(self) -> str:
-        return os.path.join(MODS_DIR, self.subdir, self.get_filename())
+        return os.path.join(config.MODS_DIR, self.subdir, self.get_filename())
 
     def __repr__(self):
         return f"Mod(name='{self.name}', version='{self.version}', subdir='{self.subdir}')"
 
-    def load_everest_yaml(self) -> Optional[dict]:
+    def load_everest_yaml(self) -> dict | None:
         mod_file = self.get_filepath()
         return load_mod_cfg(mod_file)
 
-    def get_mod_deps(self, optional: bool = False) -> List[dict[str, str]]:
+    def get_mod_deps(self, optional: bool = False) -> list[dict[str, str]]:
         cfg = self.load_everest_yaml()
         if not cfg:
             logger.critical(f"Failed to load everest.yaml for mod '{self.get_filename()}'. Cannot determine dependencies.")

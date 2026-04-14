@@ -1,30 +1,94 @@
 import sys
+from pathlib import Path
 from loguru import logger
 
-from .config import DEFAULT_LOG_LEVEL
+from . import config
 from .cli import CelesteModCLI
+from .path import get_celeste_dir, set_mod_paths
 
-cli = CelesteModCLI()
+class GlobalOptions:
+    celeste_dir: Path | None = None
+    log_level: str = config.DEFAULT_LOG_LEVEL
 
 def cmd_help():
     print(f"""\
-Usage: celeste-mod-manager <command> [args]
+Usage: celeste-mod-manager [options] <command> [args]
 
 Commands:
     help               Show this help message.
     search             Search for mods in the mod database.
     list               List all installed mods.
     list-tree          List all installed mods and their dependencies in a tree format.
-    install            Install some mod(s).\
-""", file=sys.stderr)
+    install            Install some mod(s).
+
+Options:
+    --celeste-dir <path>  Specify the path to the Celeste directory.
+    --log-level <level>   Set the log level (TRACE, DEBUG, INFO, WARNING, ERROR, CRITICAL).""",
+    file=sys.stderr)
+
+def _parse_global_args(args: list[str]) -> tuple[list[str], GlobalOptions, bool]:
+    options = GlobalOptions()
+
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if not arg.startswith("-") and not arg.startswith("--"):
+            break
+
+        if arg == "--celeste-dir":
+            if i + 1 >= len(args):
+                print("ERROR: --celeste-dir requires a path value.", file=sys.stderr)
+                sys.exit(1)
+            options.celeste_dir = Path(args[i + 1]).expanduser()
+            i += 2
+            continue
+        elif arg == "--help" or arg == "-h":
+            cmd_help()
+            sys.exit(0)
+        elif arg == "--log-level":
+            if i + 1 >= len(args):
+                print("ERROR: --log-level requires a value.", file=sys.stderr)
+                sys.exit(1)
+            level = args[i + 1].upper()
+            if level not in ("TRACE", "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"):
+                print(f"ERROR: invalid log level '{level}'. Valid levels are: TRACE, DEBUG, INFO, WARNING, ERROR, CRITICAL.", file=sys.stderr)
+                sys.exit(1)
+            options.log_level = level
+            i += 2
+            continue
+        else:
+            print(f"ERROR: unknown argument '{arg}'", file=sys.stderr)
+            sys.exit(1)
+
+    return args[i:], options, False
 
 def main():
-    logger.remove()
-    logger.add(sys.stderr, level=DEFAULT_LOG_LEVEL)
-
     cli = CelesteModCLI()
     # Dispatch
-    args = sys.argv[1:]
+    args, options, parse_error = _parse_global_args(sys.argv[1:])
+    if parse_error:
+        print(f"ERROR: failed to parse arguments.", file=sys.stderr)
+        return 1
+
+    logger.remove()
+    logger.add(sys.stderr, level=options.log_level)
+
+    logger.debug(f"Global options: {options}, Remaining args: {args}")
+
+    if options.celeste_dir is not None:
+        if options.celeste_dir.exists() and options.celeste_dir.is_dir():
+            logger.debug(f"Using Celeste directory from command line: {options.celeste_dir}")
+            set_mod_paths(options.celeste_dir)
+        else:
+            print(f"ERROR: specified Celeste directory '{options.celeste_dir}' does not exist or is not a directory.", file=sys.stderr)
+            return 1
+    else:
+        celeste_dir = get_celeste_dir()
+        if celeste_dir is None:
+            print("ERROR: Could not find Celeste installation directory. Please make sure Celeste is installed.", file=sys.stderr)
+            return 1
+        set_mod_paths(celeste_dir)
+
     if len(args) == 0:
         cmd_help()
         return 1
