@@ -7,6 +7,7 @@ from . import config
 from .mod import Mod
 from .mod_db import ModInfo, get_mod_info
 
+
 def _download_mod(mod_info: ModInfo) -> Mod | None:
     if not mod_info or not mod_info.submissionFile:
         logger.critical("Invalid mod info provided for download.")
@@ -30,6 +31,7 @@ def _download_mod(mod_info: ModInfo) -> Mod | None:
             os.remove(filepath)
         return None
 
+
 def get_installed_mods() -> list[Mod]:
     if not os.path.exists(config.MODS_DIR):
         return []
@@ -48,7 +50,10 @@ def get_installed_mods() -> list[Mod]:
                         mods.append(mod)
     return mods
 
-def resolve_deps(mod: Mod, optional: bool = False, _visited: set | None = None) -> tuple[list[Mod], list[str]]:
+
+def resolve_deps(
+    mod: Mod, optional: bool = False, _visited: set | None = None
+) -> tuple[list[Mod], list[str]]:
     if _visited is None:
         _visited = set()
 
@@ -64,8 +69,8 @@ def resolve_deps(mod: Mod, optional: bool = False, _visited: set | None = None) 
         os.makedirs(config.MODS_DIR, exist_ok=True)
 
     for dep in deps:
-        dep_name = dep['Name']
-        dep_version = dep['Version']
+        dep_name = dep["Name"]
+        dep_version = dep["Version"]
 
         if dep_name in ["Everest", "Celeste", "EverestCore"]:
             logger.debug(f"Skipping dependency '{dep_name}' as it's a core component.")
@@ -78,13 +83,19 @@ def resolve_deps(mod: Mod, optional: bool = False, _visited: set | None = None) 
         found_mods = [m for m in installed_mods if m.name == dep_name]
 
         if len(found_mods) > 1:
-            logger.error(f"Multiple mods found for dependency '{dep_name}': {found_mods}")
+            logger.error(
+                f"Multiple mods found for dependency '{dep_name}': {found_mods}"
+            )
             failed_deps.append(dep_name)
         elif len(found_mods) == 1:
             dep_mod = found_mods[0]
             if dep_mod.version != dep_version:
-                logger.warning(f"Version mismatch for '{dep_name}': required {dep_version}, found {dep_mod.version}")
-            sub_resolved, sub_failed = resolve_deps(dep_mod, optional=optional, _visited=_visited)
+                logger.warning(
+                    f"Version mismatch for '{dep_name}': required {dep_version}, found {dep_mod.version}"
+                )
+            sub_resolved, sub_failed = resolve_deps(
+                dep_mod, optional=optional, _visited=_visited
+            )
             resolved_deps.extend(sub_resolved)
             failed_deps.extend(sub_failed)
         else:
@@ -97,9 +108,13 @@ def resolve_deps(mod: Mod, optional: bool = False, _visited: set | None = None) 
             dep_mod = _download_mod(mod_info)
             if dep_mod:
                 if dep_mod.version != dep_version:
-                    logger.warning(f"Version mismatch for downloaded '{dep_name}': required {dep_version}, got {dep_mod.version}")
+                    logger.warning(
+                        f"Version mismatch for downloaded '{dep_name}': required {dep_version}, got {dep_mod.version}"
+                    )
                 resolved_deps.append(dep_mod)
-                sub_resolved, sub_failed = resolve_deps(dep_mod, optional=optional, _visited=_visited)
+                sub_resolved, sub_failed = resolve_deps(
+                    dep_mod, optional=optional, _visited=_visited
+                )
                 resolved_deps.extend(sub_resolved)
                 failed_deps.extend(sub_failed)
             else:
@@ -107,6 +122,7 @@ def resolve_deps(mod: Mod, optional: bool = False, _visited: set | None = None) 
                 failed_deps.append(dep_name)
 
     return resolved_deps, failed_deps
+
 
 def pretty_print_mods(mods: list[Mod]):
     if not mods or len(mods) == 0:
@@ -123,6 +139,7 @@ def pretty_print_mods(mods: list[Mod]):
     for mod in mods:
         print(f"{mod.name:<{max_name_len}} {mod.version:<{max_version_len}}")
 
+
 def analyse_mod_deps(maxdepth: int, optional: bool = False):
     mods = get_installed_mods()
     if not mods:
@@ -137,10 +154,10 @@ def analyse_mod_deps(maxdepth: int, optional: bool = False):
         graph[mod.name] = []
         deps = mod.get_mod_deps(optional=optional)
         required_deps = mod.get_mod_deps(optional=False)
-        required_names = {d.get('Name') for d in required_deps if d.get('Name')}
+        required_names = {d.get("Name") for d in required_deps if d.get("Name")}
 
         for dep in deps:
-            dep_name = dep['Name']
+            dep_name = dep["Name"]
             if not dep_name or dep_name in ["Everest", "Celeste", "EverestCore"]:
                 continue
 
@@ -155,6 +172,7 @@ def analyse_mod_deps(maxdepth: int, optional: bool = False):
 
     # Check whether the graph has cycles
     visited = {}
+
     def has_cycle(node, path):
         visited[node] = 1
         path.append(node)
@@ -183,7 +201,9 @@ def analyse_mod_deps(maxdepth: int, optional: bool = False):
     roots = [node for node in graph if in_degree.get(node) == 0]
     roots.sort(key=lambda x: x.lower())
 
-    def print_tree(node, prefix="", is_last=True, is_root=False, is_opt=False, current_depth=1):
+    def print_tree(
+        node, prefix="", is_last=True, is_root=False, is_opt=False, current_depth=1
+    ):
         if is_root:
             print(f"{node} ({installed_dict[node].version})")
             new_prefix = prefix
@@ -192,7 +212,11 @@ def analyse_mod_deps(maxdepth: int, optional: bool = False):
             if node.endswith(" (Missing)"):
                 display_node = f"\033[91m{node}\033[0m"
             else:
-                display_node = f"{node} ({installed_dict[node].version})" if node in installed_dict else node
+                display_node = (
+                    f"{node} ({installed_dict[node].version})"
+                    if node in installed_dict
+                    else node
+                )
             if is_opt:
                 display_node = f"{display_node} (Optional)"
             print(f"{prefix}{connector}{display_node}")
@@ -203,13 +227,21 @@ def analyse_mod_deps(maxdepth: int, optional: bool = False):
 
         children = sorted(graph.get(node, []), key=lambda x: x[0].lower())
         for i, (child, child_is_opt) in enumerate(children):
-            is_last_child = (i == len(children) - 1)
-            print_tree(child, new_prefix, is_last_child, is_root=False, is_opt=child_is_opt, current_depth=current_depth + 1)
+            is_last_child = i == len(children) - 1
+            print_tree(
+                child,
+                new_prefix,
+                is_last_child,
+                is_root=False,
+                is_opt=child_is_opt,
+                current_depth=current_depth + 1,
+            )
 
     for i in range(len(roots)):
         print_tree(roots[i], is_root=True)
         if i < len(roots) - 1:
             print()
+
 
 def ensure_mod(mod_name: str, verbose: bool = False) -> Mod | None:
     """Ensure the mod exists locally, if not, try to download it. Return the Mod instance if successful, or None if failed."""

@@ -6,6 +6,7 @@ from loguru import logger
 
 from . import config
 
+
 def load_mod_cfg(mod_file: str) -> dict | None:
     filepath = os.path.join(config.MODS_DIR, mod_file)
     if not os.path.exists(filepath):
@@ -13,17 +14,27 @@ def load_mod_cfg(mod_file: str) -> dict | None:
         return None
 
     try:
-        with zipfile.ZipFile(filepath, 'r') as zf:
-            yaml_filename = next((name for name in zf.namelist() if name.lower() in ('everest.yaml', 'everest.yml')), None)
+        with zipfile.ZipFile(filepath, "r") as zf:
+            yaml_filename = next(
+                (
+                    name
+                    for name in zf.namelist()
+                    if name.lower() in ("everest.yaml", "everest.yml")
+                ),
+                None,
+            )
             if yaml_filename:
                 with zf.open(yaml_filename) as f:
-                    return yaml.safe_load(f)[0] # Assuming the YAML file contains a list and we want the first item
+                    return yaml.safe_load(f)[
+                        0
+                    ]  # Assuming the YAML file contains a list and we want the first item
             else:
                 logger.warning(f"No everest.yaml found in '{mod_file}'.")
                 return None
     except Exception as e:
         logger.error(f"Failed to read from '{mod_file}': {e}")
         return None
+
 
 # Represent a local mod.
 class Mod:
@@ -45,11 +56,13 @@ class Mod:
             logger.error(f"File '{filepath}' does not exist.")
             return None
         if filename.endswith(".zip"):
-            name_version = filename[:-4].split('-', 1)
+            name_version = filename[:-4].split("-", 1)
             if len(name_version) == 2:
                 name, version = name_version
                 return Mod(name=name, version=version, subdir=subdir)
-        logger.error(f"Filename '{filename}' does not match expected format 'Name-Version.zip'.")
+        logger.error(
+            f"Filename '{filename}' does not match expected format 'Name-Version.zip'."
+        )
         return None
 
     def get_filename(self) -> str:
@@ -59,7 +72,9 @@ class Mod:
         return os.path.join(config.MODS_DIR, self.subdir, self.get_filename())
 
     def __repr__(self):
-        return f"Mod(name='{self.name}', version='{self.version}', subdir='{self.subdir}')"
+        return (
+            f"Mod(name='{self.name}', version='{self.version}', subdir='{self.subdir}')"
+        )
 
     def load_everest_yaml(self) -> dict | None:
         mod_file = self.get_filepath()
@@ -68,8 +83,11 @@ class Mod:
     def get_mod_deps(self, optional: bool = False) -> list[dict[str, str]]:
         cfg = self.load_everest_yaml()
         if not cfg:
-            logger.critical(f"Failed to load everest.yaml for mod '{self.get_filename()}'. Cannot determine dependencies.")
+            logger.critical(
+                f"Failed to load everest.yaml for mod '{self.get_filename()}'. Cannot determine dependencies."
+            )
             sys.exit(1)
         else:
-            return cfg.get('Dependencies', []) + (cfg.get('OptionalDependencies', []) if optional else [])
-
+            return cfg.get("Dependencies", []) + (
+                cfg.get("OptionalDependencies", []) if optional else []
+            )

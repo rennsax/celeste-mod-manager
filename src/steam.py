@@ -14,8 +14,11 @@ def _get_steam_root() -> Path | None:
     if system == "Windows":
         try:
             import winreg
+
             try:
-                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Valve\Steam") as key:
+                with winreg.OpenKey(
+                    winreg.HKEY_CURRENT_USER, r"Software\Valve\Steam"
+                ) as key:
                     install_path, _ = winreg.QueryValueEx(key, "SteamPath")
                     steam_root = Path(install_path)
                     if steam_root.exists():
@@ -24,7 +27,9 @@ def _get_steam_root() -> Path | None:
                 pass
 
             try:
-                with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Valve\Steam") as key:
+                with winreg.OpenKey(
+                    winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Valve\Steam"
+                ) as key:
                     install_path, _ = winreg.QueryValueEx(key, "InstallPath")
                     steam_root = Path(install_path)
                     if steam_root.exists():
@@ -89,24 +94,29 @@ def steam_find_game(app_id: int) -> Path | None:
     # Search through all library folders
     for key in libraries:
         lib_data = libraries[key]
-        apps = lib_data.get('apps', {})
+        apps = lib_data.get("apps", {})
 
         if str(app_id) in apps:
-            library_path = lib_data.get('path')
+            library_path = lib_data.get("path")
 
             # 查找 manifest 文件以获取文件夹名称
             # manifest 文件名格式为 appmanifest_APPID.acf
-            manifest_path = Path(library_path) / "steamapps" / f"appmanifest_{app_id}.acf"
+            manifest_path = (
+                Path(library_path) / "steamapps" / f"appmanifest_{app_id}.acf"
+            )
 
             if manifest_path.exists():
-                with open(manifest_path, 'r', encoding='utf-8') as mf:
+                with open(manifest_path, "r", encoding="utf-8") as mf:
                     manifest_data = vdf.parse(mf)
                     # 获取游戏的文件夹名称
-                    folder_name = manifest_data.get('AppState', {}).get('installdir')
+                    folder_name = manifest_data.get("AppState", {}).get("installdir")
 
-                    full_path = Path(library_path) / "steamapps" / "common" / folder_name
+                    full_path = (
+                        Path(library_path) / "steamapps" / "common" / folder_name
+                    )
                     return full_path
     return None
+
 
 if __name__ == "__main__":
     print(steam_find_game(504230))

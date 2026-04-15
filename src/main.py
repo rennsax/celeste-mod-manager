@@ -6,12 +6,15 @@ from . import config
 from .cli import CelesteModCLI
 from .path import get_celeste_dir, set_mod_paths
 
+
 class GlobalOptions:
     celeste_dir: Path | None = None
     log_level: str = config.DEFAULT_LOG_LEVEL
 
+
 def cmd_help():
-    print(f"""\
+    print(
+        f"""\
 Usage: celeste-mod-manager [options] <command> [args]
 
 Commands:
@@ -24,7 +27,9 @@ Commands:
 Options:
     --celeste-dir <path>  Specify the path to the Celeste directory.
     --log-level <level>   Set the log level (TRACE, DEBUG, INFO, WARNING, ERROR, CRITICAL).""",
-    file=sys.stderr)
+        file=sys.stderr,
+    )
+
 
 def _parse_global_args(args: list[str]) -> tuple[list[str], GlobalOptions, bool]:
     options = GlobalOptions()
@@ -51,7 +56,10 @@ def _parse_global_args(args: list[str]) -> tuple[list[str], GlobalOptions, bool]
                 sys.exit(1)
             level = args[i + 1].upper()
             if level not in ("TRACE", "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"):
-                print(f"ERROR: invalid log level '{level}'. Valid levels are: TRACE, DEBUG, INFO, WARNING, ERROR, CRITICAL.", file=sys.stderr)
+                print(
+                    f"ERROR: invalid log level '{level}'. Valid levels are: TRACE, DEBUG, INFO, WARNING, ERROR, CRITICAL.",
+                    file=sys.stderr,
+                )
                 sys.exit(1)
             options.log_level = level
             i += 2
@@ -61,6 +69,7 @@ def _parse_global_args(args: list[str]) -> tuple[list[str], GlobalOptions, bool]
             sys.exit(1)
 
     return args[i:], options, False
+
 
 def main():
     cli = CelesteModCLI()
@@ -88,15 +97,23 @@ def main():
 
     if options.celeste_dir is not None:
         if options.celeste_dir.exists() and options.celeste_dir.is_dir():
-            logger.debug(f"Using Celeste directory from command line: {options.celeste_dir}")
+            logger.debug(
+                f"Using Celeste directory from command line: {options.celeste_dir}"
+            )
             set_mod_paths(options.celeste_dir)
         else:
-            print(f"ERROR: specified Celeste directory '{options.celeste_dir}' does not exist or is not a directory.", file=sys.stderr)
+            print(
+                f"ERROR: specified Celeste directory '{options.celeste_dir}' does not exist or is not a directory.",
+                file=sys.stderr,
+            )
             return 1
     else:
         celeste_dir = get_celeste_dir()
         if celeste_dir is None:
-            print("ERROR: Could not find Celeste installation directory. Please make sure Celeste is installed.", file=sys.stderr)
+            print(
+                "ERROR: Could not find Celeste installation directory. Please make sure Celeste is installed.",
+                file=sys.stderr,
+            )
             return 1
         set_mod_paths(celeste_dir)
 
@@ -105,14 +122,15 @@ def main():
     elif subcommand == "list":
         cli.list(extra_args)
     elif subcommand == "list-tree":
-        return(cli.list_tree(extra_args, prog_name=f"celeste-mod-manager list-tree"))
+        return cli.list_tree(extra_args, prog_name=f"celeste-mod-manager list-tree")
     elif subcommand == "install":
-        return(cli.install(extra_args, prog_name=f"celeste-mod-manager install"))
+        return cli.install(extra_args, prog_name=f"celeste-mod-manager install")
     else:
         print(f"ERROR: unknown command '{subcommand}'", file=sys.stderr)
         print()
         cmd_help()
         return 1
+
 
 if __name__ == "__main__":
     sys.exit(main())

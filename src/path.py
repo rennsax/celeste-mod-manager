@@ -1,4 +1,3 @@
-
 import os
 import platform
 from pathlib import Path
@@ -18,6 +17,7 @@ def get_celeste_dir() -> Path | None:
         return celeste_dir
     elif system == "Darwin":  # macOS
         return celeste_dir / "Celeste.app" / "Contents" / "Resources"
+
 
 def set_mod_paths(celeste_dir: Path):
     config.MOD_DB_PATH = os.path.join(celeste_dir, "celeste_mod_db.json")
