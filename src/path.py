@@ -1,7 +1,6 @@
 
 import os
 import platform
-import sys
 from pathlib import Path
 from loguru import logger
 
@@ -10,12 +9,13 @@ from . import config
 
 
 def get_celeste_dir() -> Path | None:
+    """Try to find the Celeste installation directory. Return the path if found, or None if not found."""
     celeste_dir = steam_find_game(504230)
     if not celeste_dir:
         return None
     system = platform.system()
     if system == "Windows" or system == "Linux":
-        return celeste_dir / "Mods"
+        return celeste_dir
     elif system == "Darwin":  # macOS
         return celeste_dir / "Celeste.app" / "Contents" / "Resources"
 
