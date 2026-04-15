@@ -12,6 +12,7 @@ from .mod_manager import (
     analyse_mod_deps,
     ensure_mod,
     resolve_deps,
+    EnsureModStatus,
 )
 
 
@@ -20,9 +21,22 @@ class CelesteModCLI:
     def _install_mod(
         self, mod_name: str, no_dep: bool = False, optional_deps: bool = False
     ) -> bool:
-        mod = ensure_mod(mod_name, True)
+        mod, _status = ensure_mod(mod_name)
         if not mod:
+            if _status == EnsureModStatus.NOT_FOUND_IN_DB:
+                print(f"ERROR: mod '{mod_name}' not found in the database.")
+            elif _status == EnsureModStatus.DOWNLOAD_FAILED:
+                print(f"ERROR: failed to download mod '{mod_name}'.")
+            elif _status == EnsureModStatus.UNEXPECTED:
+                print(
+                    f"ERROR: failed to install mod '{mod_name}' due to an unexpected error."
+                )
             return False
+
+        assert _status in {EnsureModStatus.INSTALLED, EnsureModStatus.ALREADY_EXISTS}
+
+        if _status == EnsureModStatus.ALREADY_EXISTS:
+            print(f"Mod '{mod_name}' already exists locally.")
 
         if no_dep:
             return True
@@ -100,7 +114,9 @@ class CelesteModCLI:
             print("ERROR: no mod specified to install.", file=sys.stderr)
             return 1
 
+        # The root mods to install
         mods_to_install: list[str] = list()
+
         if options.requirement:
             if not os.path.isfile(options.requirement):
                 print(
@@ -131,7 +147,8 @@ class CelesteModCLI:
                     f"\033[91mFailed to install '{mod_name}'.\033[0m", file=sys.stderr
                 )
                 exit_code = 1
-            print(f"Successfully installed '{mod_name}'.\n")
+            else:
+                print(f"Successfully installed '{mod_name}'.\n")
 
         return exit_code
 

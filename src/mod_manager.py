@@ -1,6 +1,7 @@
 import os
 import sys
 import urllib.request
+from enum import Enum
 from loguru import logger
 
 from . import config
@@ -243,18 +244,31 @@ def analyse_mod_deps(maxdepth: int, optional: bool = False):
             print()
 
 
-def ensure_mod(mod_name: str, verbose: bool = False) -> Mod | None:
-    """Ensure the mod exists locally, if not, try to download it. Return the Mod instance if successful, or None if failed."""
-    mods = get_installed_mods()
-    for mod in mods:
-        if mod.name == mod_name:
-            if verbose:
-                print(f"Mod '{mod_name}' already exists locally.")
-            return mod
-    mod_info = get_mod_info(mod_name)
-    if not mod_info:
-        logger.info(f"Mod '{mod_name}' not found in the database.")
-        if verbose:
-            print(f"Failed to find mod '{mod_name}' in the mod database.")
-        return None
-    return _download_mod(mod_info)
+class EnsureModStatus(Enum):
+    INSTALLED = "installed"
+    ALREADY_EXISTS = "already_exists"
+    NOT_FOUND_IN_DB = "not_found_in_db"
+    DOWNLOAD_FAILED = "download_failed"
+    UNEXPECTED = "unexpected"
+
+
+def ensure_mod(mod_name: str) -> tuple[Mod | None, EnsureModStatus]:
+    """Ensure mod exists locally; return (Mod|None, status)."""
+    try:
+        mods = get_installed_mods()
+        for mod in mods:
+            if mod.name == mod_name:
+                return mod, EnsureModStatus.ALREADY_EXISTS
+
+        mod_info = get_mod_info(mod_name)
+        if not mod_info:
+            logger.info(f"Mod '{mod_name}' not found in the database.")
+            return None, EnsureModStatus.NOT_FOUND_IN_DB
+
+        mod = _download_mod(mod_info)
+        if mod is None:
+            return None, EnsureModStatus.DOWNLOAD_FAILED
+        return mod, EnsureModStatus.INSTALLED
+    except Exception as e:
+        logger.error(f"Failed to ensure mod '{mod_name}': {e}")
+        return None, EnsureModStatus.UNEXPECTED
