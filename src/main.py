@@ -120,7 +120,7 @@ def main():
     if subcommand == "search":
         cli.search(extra_args)
     elif subcommand == "list":
-        cli.list(extra_args)
+        cli.list_mods(extra_args)
     elif subcommand == "list-tree":
         return cli.list_tree(extra_args, prog_name=f"celeste-mod-manager list-tree")
     elif subcommand == "install":

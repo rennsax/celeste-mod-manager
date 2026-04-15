@@ -167,13 +167,13 @@ class CelesteModCLI:
             pretty_print_mod_info(mod)
             print("-" * 40)
 
-    def list(self, args: list[str]) -> None:
+    def list_mods(self, args: list[str]) -> None:
         """List all installed mods."""
         mods = get_installed_mods()
         pretty_print_mods(mods)
 
     def list_tree(
-        self, args: "list[str]", prog_name: str = "celeste-mod-manager list-tree"
+        self, args: list[str], prog_name: str = "celeste-mod-manager list-tree"
     ) -> int:
         """List all installed mods and their dependencies in a tree format."""
         parser = optparse.OptionParser(
