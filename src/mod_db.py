@@ -96,7 +96,7 @@ def get_mod_db(url: str, force_update: bool = config.FORCE_UPDATE_DEFAULT) -> di
             needs_update = True
 
     if needs_update:
-        logger.info("Downloading mod list from the server...")
+        logger.info("Updating mod list from the server...")
         with urllib.request.urlopen(url) as response:
             db_data = json.loads(response.read().decode("utf-8"))
         db_data["lastUpdateTime"] = time.time()
