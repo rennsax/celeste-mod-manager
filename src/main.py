@@ -64,11 +64,22 @@ def _parse_global_args(args: list[str]) -> tuple[list[str], GlobalOptions, bool]
 
 def main():
     cli = CelesteModCLI()
+
     # Dispatch
     args, options, parse_error = _parse_global_args(sys.argv[1:])
     if parse_error:
         print(f"ERROR: failed to parse arguments.", file=sys.stderr)
         return 1
+
+    if len(args) == 0:
+        cmd_help()
+        return 1
+    subcommand = args[0]
+    extra_args = args[1:]
+
+    if subcommand == "help":
+        cmd_help()
+        return 0
 
     logger.remove()
     logger.add(sys.stderr, level=options.log_level)
@@ -89,24 +100,16 @@ def main():
             return 1
         set_mod_paths(celeste_dir)
 
-    if len(args) == 0:
-        cmd_help()
-        return 1
-    command = args[0]
-    extra_args = args[1:]
-    if command == "help" or command == "--help" or command == "-h":
-        cmd_help()
-        return 0
-    elif command == "search":
+    if subcommand == "search":
         cli.search(extra_args)
-    elif command == "list":
+    elif subcommand == "list":
         cli.list(extra_args)
-    elif command == "list-tree":
+    elif subcommand == "list-tree":
         return(cli.list_tree(extra_args, prog_name=f"celeste-mod-manager list-tree"))
-    elif command == "install":
+    elif subcommand == "install":
         return(cli.install(extra_args, prog_name=f"celeste-mod-manager install"))
     else:
-        print(f"ERROR: unknown command '{command}'", file=sys.stderr)
+        print(f"ERROR: unknown command '{subcommand}'", file=sys.stderr)
         print()
         cmd_help()
         return 1

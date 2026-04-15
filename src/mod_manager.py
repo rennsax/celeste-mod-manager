@@ -84,7 +84,6 @@ def resolve_deps(mod: Mod, optional: bool = False, _visited: set | None = None) 
             dep_mod = found_mods[0]
             if dep_mod.version != dep_version:
                 logger.warning(f"Version mismatch for '{dep_name}': required {dep_version}, found {dep_mod.version}")
-            resolved_deps.append(dep_mod)
             sub_resolved, sub_failed = resolve_deps(dep_mod, optional=optional, _visited=_visited)
             resolved_deps.extend(sub_resolved)
             failed_deps.extend(sub_failed)
@@ -212,14 +211,18 @@ def analyse_mod_deps(maxdepth: int, optional: bool = False):
         if i < len(roots) - 1:
             print()
 
-def ensure_mod(mod_name: str) -> Mod | None:
+def ensure_mod(mod_name: str, verbose: bool = False) -> Mod | None:
     """Ensure the mod exists locally, if not, try to download it. Return the Mod instance if successful, or None if failed."""
     mods = get_installed_mods()
     for mod in mods:
         if mod.name == mod_name:
+            if verbose:
+                print(f"Mod '{mod_name}' already exists locally.")
             return mod
     mod_info = get_mod_info(mod_name)
     if not mod_info:
-        logger.error(f"Mod '{mod_name}' not found in the database.")
+        logger.info(f"Mod '{mod_name}' not found in the database.")
+        if verbose:
+            print(f"Failed to find mod '{mod_name}' in the mod database.")
         return None
     return _download_mod(mod_info)

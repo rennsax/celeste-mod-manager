@@ -11,7 +11,7 @@ from .mod_manager import get_installed_mods, pretty_print_mods, analyse_mod_deps
 class CelesteModCLI:
 
     def _install_mod(self, mod_name: str, no_dep: bool = False, optional_deps: bool = False) -> bool:
-        mod = ensure_mod(mod_name)
+        mod = ensure_mod(mod_name, True)
         if not mod:
             return False
 
