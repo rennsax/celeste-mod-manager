@@ -2,6 +2,7 @@ import os
 import sys
 import urllib.request
 from enum import Enum
+import yaml
 from loguru import logger
 
 from . import config
@@ -43,12 +44,6 @@ def get_installed_mods() -> list[Mod]:
             mod = Mod.from_filename(filename)
             if mod:
                 mods.append(mod)
-        elif os.path.isdir(os.path.join(config.MODS_DIR, filename)):
-            for sub_file in os.listdir(os.path.join(config.MODS_DIR, filename)):
-                if sub_file.endswith(".zip"):
-                    mod = Mod.from_filename(sub_file, subdir=filename)
-                    if mod:
-                        mods.append(mod)
     return mods
 
 
@@ -135,7 +130,7 @@ def pretty_print_mods(mods: list[Mod]):
     max_name_len = max([len("Package")] + [len(mod.name) for mod in mods])
     max_version_len = max([len("Version")] + [len(mod.version) for mod in mods])
 
-    print(f"{'Package':<{max_name_len}} {'Version':<{max_version_len}}")
+    print(f"{'Mod':<{max_name_len}} {'Version':<{max_version_len}}")
     print(f"{'-' * max_name_len} {'-' * max_version_len}")
     for mod in mods:
         print(f"{mod.name:<{max_name_len}} {mod.version:<{max_version_len}}")
@@ -252,12 +247,91 @@ class EnsureModStatus(Enum):
     UNEXPECTED = "unexpected"
 
 
-def ensure_mod(mod_name: str) -> tuple[Mod | None, EnsureModStatus]:
-    """Ensure mod exists locally; return (Mod|None, status)."""
+def _record_root_installed_mod(mod: Mod) -> None:
+    if not config._ENABLE_ROOT_INSTALL_TRACK:
+        return
+
+    logger.debug(f"Try to record root mod '{mod.name}' with version '{mod.version}'.")
+    installed_mods_path = os.path.join(config.MODS_DIR, "installed_mods.yaml")
+
+    data: dict = {}
+    roots = None
+    if os.path.exists(installed_mods_path):
+        with open(installed_mods_path, "r", encoding="utf-8") as f:
+            loaded = yaml.safe_load(f)
+            if isinstance(loaded, dict):
+                data = loaded
+            else:
+                logger.warning(
+                    f"Unexpected format in '{installed_mods_path}'. Attempt to overwrite it with new data."
+                )
+        roots = data.get("root")
+        if not isinstance(roots, list):
+            logger.warning(
+                f"Unexpected format in '{installed_mods_path}'. Attempt to overwrite it with new data."
+            )
+            roots = []
+    else:
+        roots = []
+
+    for recorded_mod in roots:
+        if recorded_mod["name"] == mod.name:
+            logger.debug(
+                f"Mod '{mod.name}' already recorded as root mod. Updating version to '{mod.version}'."
+            )
+            recorded_mod["version"] = mod.version
+            break
+    else:
+        logger.debug(
+            f"Recording '{mod.name}' as a new root mod with version '{mod.version}'."
+        )
+        roots.append({"name": mod.name, "version": mod.version})
+
+    data["root"] = roots
+    with open(installed_mods_path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(data, f, sort_keys=False, allow_unicode=True)
+
+
+def get_root_mods() -> list[Mod]:
+    installed_mods_path = os.path.join(config.MODS_DIR, "installed_mods.yaml")
+    if not os.path.exists(installed_mods_path):
+        return []
+
+    with open(installed_mods_path, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+        if not isinstance(data, dict):
+            logger.warning(
+                f"Unexpected format in '{installed_mods_path}'. No root mods loaded."
+            )
+            return []
+        roots = data.get("root", [])
+        if not isinstance(roots, list):
+            logger.warning(
+                f"Unexpected format for 'root' in '{installed_mods_path}'. No root mods loaded."
+            )
+            return []
+        mods = []
+        for entry in roots:
+            if isinstance(entry, dict) and "name" in entry and "version" in entry:
+                mods.append(Mod(name=entry["name"], version=entry["version"]))
+            else:
+                logger.warning(
+                    f"Invalid entry in 'root' list in '{installed_mods_path}': {entry}"
+                )
+        return mods
+
+
+def ensure_mod(mod_name: str, root: bool = False) -> tuple[Mod | None, EnsureModStatus]:
+    """Ensure that a mod with the given name is installed. If it's already installed, return it. If not, try to download and install it. If root is True, also record it as a root mod."""
     try:
         mods = get_installed_mods()
         for mod in mods:
             if mod.name == mod_name:
+                try:
+                    _record_root_installed_mod(mod)
+                except Exception as e:
+                    logger.error(f"Failed to record root mod '{mod.name}': {e}")
+                    raise e
                 return mod, EnsureModStatus.ALREADY_EXISTS
 
         mod_info = get_mod_info(mod_name)
@@ -268,7 +342,46 @@ def ensure_mod(mod_name: str) -> tuple[Mod | None, EnsureModStatus]:
         mod = _download_mod(mod_info)
         if mod is None:
             return None, EnsureModStatus.DOWNLOAD_FAILED
+        if root:
+            try:
+                _record_root_installed_mod(mod)
+            except Exception as e:
+                logger.error(f"Failed to record root mod '{mod.name}': {e}")
+                raise e
         return mod, EnsureModStatus.INSTALLED
     except Exception as e:
         logger.error(f"Failed to ensure mod '{mod_name}': {e}")
         return None, EnsureModStatus.UNEXPECTED
+
+
+class UpdateModStatus(Enum):
+    UPDATED = "updated"
+    ALREADY_UP_TO_DATE = "already_up_to_date"
+    DOWNLOAD_FAILED = "download_failed"
+    UNEXPECTED = "unexpected"
+
+
+def update_mod(mod: Mod) -> tuple[Mod | None, UpdateModStatus]:
+    """Check if there's an update for the given mod. If there is, download and install it. Return the updated mod (or the original mod if it's already up to date) and the status."""
+    root_mods = get_root_mods() if config._ENABLE_ROOT_INSTALL_TRACK else []
+    try:
+        mod_info = get_mod_info(mod.name)
+        if not mod_info:
+            logger.info(f"Mod '{mod.name}' not found in the database.")
+            return None, UpdateModStatus.UNEXPECTED
+
+        if mod_info.version == mod.version:
+            return mod, UpdateModStatus.ALREADY_UP_TO_DATE
+
+        updated_mod = _download_mod(mod_info)
+        if updated_mod is None:
+            return None, UpdateModStatus.DOWNLOAD_FAILED
+        os.remove(mod.get_filepath())
+        for root_mod in root_mods:
+            if root_mod.name == mod.name:
+                _record_root_installed_mod(updated_mod)
+                break
+        return updated_mod, UpdateModStatus.UPDATED
+    except Exception as e:
+        logger.error(f"Failed to update mod '{mod.name}': {e}")
+        return None, UpdateModStatus.UNEXPECTED

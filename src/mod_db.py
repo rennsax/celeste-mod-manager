@@ -108,22 +108,16 @@ def get_mod_db(url: str, force_update: bool = config.FORCE_UPDATE_DEFAULT) -> di
         return json.load(f).get("data", [])
 
 
-def get_mod_info(
-    mod_name: str, force_update: bool = config.FORCE_UPDATE_DEFAULT
-) -> ModInfo | None:
-    mod_list = get_mod_db(
-        f"{config.WEGFAN_API_URL}/mod/list", force_update=force_update
-    )
+def get_mod_info(mod_name: str) -> ModInfo | None:
+    mod_list = get_mod_db(f"{config.WEGFAN_API_URL}/mod/list")
     for mod in mod_list:
         if mod.get("name") == mod_name:
             return ModInfo.from_dict(mod)
     return None
 
 
-def search_mod_in_db(
-    predicate: Callable[[ModInfo], Any], auto_update: bool = config.FORCE_UPDATE_DEFAULT
-) -> list[ModInfo]:
-    mod_list = get_mod_db(f"{config.WEGFAN_API_URL}/mod/list", force_update=auto_update)
+def search_mod_in_db(predicate: Callable[[ModInfo], Any]) -> list[ModInfo]:
+    mod_list = get_mod_db(f"{config.WEGFAN_API_URL}/mod/list")
     founded_mods = []
     for mod_info_dict in mod_list:
         mod_info = ModInfo.from_dict(mod_info_dict)

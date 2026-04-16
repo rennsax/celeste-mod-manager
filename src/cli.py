@@ -5,15 +5,9 @@ import optparse
 import textwrap
 from loguru import logger
 
-from .mod_db import search_mod_in_db, pretty_print_mod_info
-from .mod_manager import (
-    get_installed_mods,
-    pretty_print_mods,
-    analyse_mod_deps,
-    ensure_mod,
-    resolve_deps,
-    EnsureModStatus,
-)
+from . import mod_manager, mod_db
+from .mod_manager import EnsureModStatus
+from . import config
 
 
 class CelesteModCLI:
@@ -21,7 +15,7 @@ class CelesteModCLI:
     def _install_mod(
         self, mod_name: str, no_dep: bool = False, optional_deps: bool = False
     ) -> bool:
-        mod, _status = ensure_mod(mod_name)
+        mod, _status = mod_manager.ensure_mod(mod_name, root=True)
         if not mod:
             if _status == EnsureModStatus.NOT_FOUND_IN_DB:
                 print(f"ERROR: mod '{mod_name}' not found in the database.")
@@ -41,7 +35,9 @@ class CelesteModCLI:
         if no_dep:
             return True
 
-        resolved_deps, failed_deps = resolve_deps(mod, optional=optional_deps)
+        resolved_deps, failed_deps = mod_manager.resolve_deps(
+            mod, optional=optional_deps
+        )
         if len(resolved_deps) != 0:
             print("Also install the following dependencies:")
             for dep in resolved_deps:
@@ -155,7 +151,9 @@ class CelesteModCLI:
     def search(self, args: list[str]) -> None:
         """Search for mods in the database and print their information."""
         pattern = args[0]
-        found_mods = search_mod_in_db(lambda m: pattern.lower() in m.name.lower())
+        found_mods = mod_db.search_mod_in_db(
+            lambda m: pattern.lower() in m.name.lower()
+        )
         if not found_mods:
             print(f"No mods found.")
             return
@@ -164,13 +162,29 @@ class CelesteModCLI:
         print("-" * 40)
 
         for mod in found_mods:
-            pretty_print_mod_info(mod)
+            mod_db.pretty_print_mod_info(mod)
             print("-" * 40)
 
-    def list_mods(self, args: list[str]) -> None:
-        """List all installed mods."""
-        mods = get_installed_mods()
-        pretty_print_mods(mods)
+    def list_mods(
+        self, args: list[str], prog_name: str = "celeste-mod-manager list"
+    ) -> None:
+        """List installed mods."""
+        parser = optparse.OptionParser(prog=prog_name)
+        parser.add_option(
+            "--root",
+            action="store_true",
+            dest="root_only",
+            default=False,
+            help="Only list root mods (i.e. mods that are directly installed by the user).",
+        )
+        options, _ = parser.parse_args(args)
+        mods = []
+        if options.root_only:
+            logger.debug("Listing only root mods.")
+            mods = mod_manager.get_root_mods()
+        else:
+            mods = mod_manager.get_installed_mods()
+        mod_manager.pretty_print_mods(mods)
 
     def list_tree(
         self, args: list[str], prog_name: str = "celeste-mod-manager list-tree"
@@ -198,8 +212,115 @@ class CelesteModCLI:
         if options.max_depth <= 0:
             print("ERROR: max depth must be a positive integer.", file=sys.stderr)
             return 1
-        analyse_mod_deps(maxdepth=options.max_depth, optional=options.optional_deps)
+        mod_manager.analyse_mod_deps(
+            maxdepth=options.max_depth, optional=options.optional_deps
+        )
         return 0
+
+    def check_updates(self, args: list[str]) -> int:
+        """Check for updates for all installed mods."""
+        mods = mod_manager.get_installed_mods()
+        if not mods:
+            print("No mods installed.")
+            return 0
+
+        name_width = max(len(mod.name) for mod in mods)
+        status_width = len("[OUTDATED]")
+        up_to_date_count = 0
+        update_available_count = 0
+        skipped_count = 0
+
+        print("-" * 72)
+        print(f"{'Status':<{status_width}}  {'Mod':<{name_width}}  Version")
+        print("-" * 72)
+
+        for mod in mods:
+            cur_mod_info = mod_db.get_mod_info(mod.name)
+            if cur_mod_info is None:
+                print(
+                    f"{'[SKIP]':<{status_width}}  {mod.name:<{name_width}}  local={mod.version}  remote=unknown"
+                )
+                skipped_count += 1
+                continue
+            # TODO: other version comparison logic?
+            if cur_mod_info.version != mod.version:
+                print(
+                    f"\033[93m{'[OUTDATED]':<{status_width}}\033[0m  {mod.name:<{name_width}}  {mod.version} -> {cur_mod_info.version}"
+                )
+                update_available_count += 1
+            else:
+                print(
+                    f"\033[92m{'[OK]':<{status_width}}\033[0m  {mod.name:<{name_width}}  {mod.version}"
+                )
+                up_to_date_count += 1
+
+        print("-" * 72)
+        print(
+            f"Summary: total={len(mods)}, outdated={update_available_count}, "
+            f"up-to-date={up_to_date_count}, skipped={skipped_count}"
+        )
+        return 0
+
+    def _get_installed_mod_by_name(self, mod_name: str) -> mod_manager.Mod | None:
+        """Get an installed mod by its name. Return None if not found."""
+        mods = mod_manager.get_installed_mods()
+        for mod in mods:
+            if mod.name == mod_name:
+                return mod
+        return None
+
+    def update_db(self, args: list[str]) -> int:
+        """Force update the local mod database from the server."""
+        try:
+            _ = mod_db.get_mod_db(
+                f"{config.WEGFAN_API_URL}/mod/list", force_update=True
+            )
+            print("Successfully updated the local mod database.")
+            return 0
+        except Exception as e:
+            print(
+                f"ERROR: failed to update the local mod database: {e}", file=sys.stderr
+            )
+            return 1
+
+    def upgrade(
+        self, args: list[str], prog_name: str = "celeste-mod-manager upgrade"
+    ) -> int:
+        """Update specified mod(s)"""
+        parser = optparse.OptionParser(prog=prog_name)
+        options, positionals = parser.parse_args(args)
+        if len(positionals) == 0:
+            print("ERROR: no mod specified to update.", file=sys.stderr)
+            return 1
+        exit_code = 0
+        for mod_name in positionals:
+            mod = self._get_installed_mod_by_name(mod_name)
+            if not mod:
+                print(
+                    f"ERROR: mod '{mod_name}' is not installed. Cannot update a mod that is not installed.",
+                    file=sys.stderr,
+                )
+                exit_code = 1
+                continue
+            logger.info(f"Try to update mod '{mod_name}'...")
+            updated_mod, status = mod_manager.update_mod(mod)
+            if not updated_mod:
+                if status == mod_manager.UpdateModStatus.DOWNLOAD_FAILED:
+                    print(f"ERROR: failed to download the update for mod '{mod_name}'.")
+                    exit_code = 1
+                elif status == mod_manager.UpdateModStatus.UNEXPECTED:
+                    print(
+                        f"ERROR: failed to update mod '{mod_name}' due to an unexpected error."
+                    )
+                elif status == mod_manager.UpdateModStatus.ALREADY_UP_TO_DATE:
+                    print(f"'{mod_name}' is already up to date.")
+                exit_code = 1
+            else:
+                assert status == mod_manager.UpdateModStatus.UPDATED
+                print(
+                    f"Successfully updated '{mod_name}' from v{mod.version} to v{updated_mod.version}.\n"
+                )
+        return exit_code
 
 
 if __name__ == "__main__":

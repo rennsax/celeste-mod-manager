@@ -23,6 +23,9 @@ Commands:
     list               List all installed mods.
     list-tree          List all installed mods and their dependencies in a tree format.
     install            Install some mod(s).
+    check-updates      Check updates for installed mods.
+    update-db          Force update the local mod database from the server.
+    upgrade            Upgrade some mod(s) to the latest version.
 
 Options:
     --celeste-dir <path>  Specify the path to the Celeste directory.
@@ -125,6 +128,12 @@ def main():
         return cli.list_tree(extra_args, prog_name=f"celeste-mod-manager list-tree")
     elif subcommand == "install":
         return cli.install(extra_args, prog_name=f"celeste-mod-manager install")
+    elif subcommand == "check-updates":
+        return cli.check_updates(extra_args)
+    elif subcommand == "update-db":
+        return cli.update_db(extra_args)
+    elif subcommand == "upgrade":
+        return cli.upgrade(extra_args, prog_name=f"celeste-mod-manager upgrade")
     else:
         print(f"ERROR: unknown command '{subcommand}'", file=sys.stderr)
         print()
