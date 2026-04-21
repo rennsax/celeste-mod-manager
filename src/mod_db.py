@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from loguru import logger
 
 from . import config
+from .colors import color
 
 
 @dataclass
@@ -127,10 +128,10 @@ def search_mod_in_db(predicate: Callable[[ModInfo], Any]) -> list[ModInfo]:
 
 
 def pretty_print_mod_info(mod_info: ModInfo):
-    print(f"Name: {mod_info.name}")
-    print(f"Version: {mod_info.version}")
-    print(f"Page URL: {mod_info.submissionFile.submission.pageUrl}")
-    print(f"Download URL: {mod_info.submissionFile.url}")
+    print(f"Name: {color(mod_info.name, 'cyan', 'bold')}")
+    print(f"Version: {color(mod_info.version, 'green')}")
+    print(f"Page URL: {color(mod_info.submissionFile.submission.pageUrl, 'blue')}")
+    print(f"Download URL: {color(mod_info.submissionFile.url, 'dim')}")
     size_bytes = mod_info.submissionFile.size
     size_kb = size_bytes / 1024
     size_str = f"{size_kb:.2f} KB"
@@ -140,5 +141,5 @@ def pretty_print_mod_info(mod_info: ModInfo):
         if size_mb > 1024:
             size_gb = size_mb / 1024
             size_str = f"{size_gb:.2f} GB"
-    print(f"File Size: {size_str}")
-    print(f"Downloads: {mod_info.submissionFile.downloads}")
+    print(f"File Size: {color(size_str, 'yellow')}")
+    print(f"Downloads: {color(str(mod_info.submissionFile.downloads), 'yellow')}")

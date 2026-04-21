@@ -6,6 +6,8 @@ import yaml
 from loguru import logger
 
 from . import config
+from .blacklist import read_blacklist
+from .colors import color
 from .mod import Mod
 from .mod_db import ModInfo, get_mod_info
 
@@ -45,6 +47,86 @@ def get_installed_mods() -> list[Mod]:
             if mod:
                 mods.append(mod)
     return mods
+
+
+def blacklist_key(mod: Mod) -> str:
+    """Filename used in blacklist.txt for ``mod`` (relative to Mods/)."""
+    return os.path.join(mod.subdir, mod.get_filename()) if mod.subdir else mod.get_filename()
+
+
+def partition_installed_mods() -> tuple[list[Mod], list[Mod]]:
+    """Return ``(enabled, disabled)`` based on the current blacklist."""
+    _, disabled_keys = read_blacklist()
+    enabled, disabled = [], []
+    for m in get_installed_mods():
+        (disabled if blacklist_key(m) in disabled_keys else enabled).append(m)
+    return enabled, disabled
+
+
+def _required_dep_names(mod: Mod) -> list[str]:
+    """Required dep names for ``mod``, excluding core components."""
+    out = []
+    for dep in mod.get_mod_deps(optional=False):
+        n = dep.get("Name")
+        if not n or n in ("Everest", "Celeste", "EverestCore"):
+            continue
+        out.append(n)
+    return out
+
+
+def disable_closure(selected: list[Mod], enabled: list[Mod]) -> list[Mod]:
+    """Return ``selected`` plus every enabled mod that (transitively) requires
+    any of the selected mods. The result is the full set that must be disabled
+    so no enabled mod is left with a missing required dependency."""
+    selected_names = {m.name for m in selected}
+    # name -> list of mods that require this name
+    rev: dict[str, list[Mod]] = {}
+    for m in enabled:
+        for dep_name in _required_dep_names(m):
+            rev.setdefault(dep_name, []).append(m)
+
+    closure_names = set(selected_names)
+    stack = list(selected_names)
+    while stack:
+        n = stack.pop()
+        for dependent in rev.get(n, []):
+            if dependent.name not in closure_names:
+                closure_names.add(dependent.name)
+                stack.append(dependent.name)
+
+    return [m for m in enabled if m.name in closure_names]
+
+
+def enable_closure(
+    selected: list[Mod], disabled: list[Mod], enabled: list[Mod]
+) -> tuple[list[Mod], list[str]]:
+    """Walk required deps of ``selected``. Any dep that is currently disabled
+    is added (recursively) so enabling the user's pick produces a working set.
+
+    Returns ``(mods_to_enable, missing_dep_names)`` where missing names are
+    required deps not present in either ``enabled`` or ``disabled``.
+    """
+    disabled_by_name: dict[str, Mod] = {m.name: m for m in disabled}
+    enabled_names = {m.name for m in enabled}
+
+    to_enable: list[Mod] = list(selected)
+    visited = {m.name for m in selected}
+    missing: list[str] = []
+
+    stack = list(selected)
+    while stack:
+        m = stack.pop()
+        for dep_name in _required_dep_names(m):
+            if dep_name in visited or dep_name in enabled_names:
+                continue
+            visited.add(dep_name)
+            dm = disabled_by_name.get(dep_name)
+            if dm is not None:
+                to_enable.append(dm)
+                stack.append(dm)
+            else:
+                missing.append(dep_name)
+    return to_enable, missing
 
 
 def resolve_deps(
@@ -127,13 +209,17 @@ def pretty_print_mods(mods: list[Mod]):
 
     mods.sort(key=lambda m: m.name.lower())
 
-    max_name_len = max([len("Package")] + [len(mod.name) for mod in mods])
+    max_name_len = max([len("Mod")] + [len(mod.name) for mod in mods])
     max_version_len = max([len("Version")] + [len(mod.version) for mod in mods])
 
-    print(f"{'Mod':<{max_name_len}} {'Version':<{max_version_len}}")
-    print(f"{'-' * max_name_len} {'-' * max_version_len}")
+    header = f"{'Mod':<{max_name_len}} {'Version':<{max_version_len}}"
+    rule = f"{'-' * max_name_len} {'-' * max_version_len}"
+    print(color(header, "bold"))
+    print(color(rule, "dim"))
     for mod in mods:
-        print(f"{mod.name:<{max_name_len}} {mod.version:<{max_version_len}}")
+        name = color(f"{mod.name:<{max_name_len}}", "cyan")
+        version = color(f"{mod.version:<{max_version_len}}", "green")
+        print(f"{name} {version}")
 
 
 def analyse_mod_deps(maxdepth: int, optional: bool = False):
@@ -201,21 +287,23 @@ def analyse_mod_deps(maxdepth: int, optional: bool = False):
         node, prefix="", is_last=True, is_root=False, is_opt=False, current_depth=1
     ):
         if is_root:
-            print(f"{node} ({installed_dict[node].version})")
+            name = color(node, "cyan", "bold")
+            version = color(f"({installed_dict[node].version})", "green")
+            print(f"{name} {version}")
             new_prefix = prefix
         else:
-            connector = "└── " if is_last else "├── "
+            connector = color("└── " if is_last else "├── ", "dim")
             if node.endswith(" (Missing)"):
-                display_node = f"\033[91m{node}\033[0m"
+                display_node = color(node, "red")
+            elif node in installed_dict:
+                name = color(node, "cyan")
+                version = color(f"({installed_dict[node].version})", "green")
+                display_node = f"{name} {version}"
             else:
-                display_node = (
-                    f"{node} ({installed_dict[node].version})"
-                    if node in installed_dict
-                    else node
-                )
+                display_node = node
             if is_opt:
-                display_node = f"{display_node} (Optional)"
-            print(f"{prefix}{connector}{display_node}")
+                display_node = f"{display_node} {color('(Optional)', 'dim')}"
+            print(f"{color(prefix, 'dim')}{connector}{display_node}")
             new_prefix = prefix + ("    " if is_last else "│   ")
 
         if current_depth >= maxdepth:

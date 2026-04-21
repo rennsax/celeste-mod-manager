@@ -27,6 +27,7 @@ dependencies = [
     "pyyaml",
     "loguru",
     "vdf",
+    "questionary>=2.0",
 ]
 
 [project.optional-dependencies]

@@ -5,9 +5,19 @@ import optparse
 import textwrap
 from loguru import logger
 
-from . import mod_manager, mod_db
-from .mod_manager import EnsureModStatus
-from . import config
+import questionary
+
+from . import config, mod_db, mod_manager
+from .mod_manager import (
+    EnsureModStatus,
+    blacklist_key,
+    disable_closure,
+    enable_closure,
+    partition_installed_mods,
+)
+from .blacklist import read_blacklist, write_blacklist
+from .colors import color
+from .pager import paged_output
 
 
 class CelesteModCLI:
@@ -18,19 +28,19 @@ class CelesteModCLI:
         mod, _status = mod_manager.ensure_mod(mod_name, root=True)
         if not mod:
             if _status == EnsureModStatus.NOT_FOUND_IN_DB:
-                print(f"ERROR: mod '{mod_name}' not found in the database.")
+                print(f"ERROR: mod '{color(mod_name, 'cyan')}' not found in the database.")
             elif _status == EnsureModStatus.DOWNLOAD_FAILED:
-                print(f"ERROR: failed to download mod '{mod_name}'.")
+                print(f"ERROR: failed to download mod '{color(mod_name, 'cyan')}'.")
             elif _status == EnsureModStatus.UNEXPECTED:
                 print(
-                    f"ERROR: failed to install mod '{mod_name}' due to an unexpected error."
+                    f"ERROR: failed to install mod '{color(mod_name, 'cyan')}' due to an unexpected error."
                 )
             return False
 
         assert _status in {EnsureModStatus.INSTALLED, EnsureModStatus.ALREADY_EXISTS}
 
         if _status == EnsureModStatus.ALREADY_EXISTS:
-            print(f"Mod '{mod_name}' already exists locally.")
+            print(f"Mod '{color(mod_name, 'cyan')}' {color('already exists', 'yellow')} locally.")
 
         if no_dep:
             return True
@@ -39,14 +49,16 @@ class CelesteModCLI:
             mod, optional=optional_deps
         )
         if len(resolved_deps) != 0:
-            print("Also install the following dependencies:")
+            print(color("Also install the following dependencies:", "bold"))
             for dep in resolved_deps:
-                print(f"  - {dep.name} (v{dep.version})")
+                name = color(dep.name, "cyan")
+                version = color(f"v{dep.version}", "green")
+                print(f"  - {name} ({version})")
             print()
         if len(failed_deps) != 0:
-            failed_deps_str = ", ".join(str(mod) for mod in failed_deps)
+            failed_deps_str = ", ".join(color(str(mod), "cyan") for mod in failed_deps)
             print(
-                f"ERROR: Failed to install the dependencies for {mod_name}: {failed_deps_str}."
+                f"ERROR: Failed to install the dependencies for {color(mod_name, 'cyan')}: {failed_deps_str}."
             )
             return False
         return True
@@ -135,16 +147,16 @@ class CelesteModCLI:
 
         exit_code = 0
         for mod_name in mods_to_install:
-            print(f"Try to install mod '{mod_name}'...")
+            print(f"Try to install mod '{color(mod_name, 'cyan')}'...")
             if not self._install_mod(
                 mod_name, no_dep=options.no_deps, optional_deps=options.optional_deps
             ):
                 print(
-                    f"\033[91mFailed to install '{mod_name}'.\033[0m", file=sys.stderr
+                    color(f"Failed to install '{mod_name}'.", "red"), file=sys.stderr
                 )
                 exit_code = 1
             else:
-                print(f"Successfully installed '{mod_name}'.\n")
+                print(color(f"Successfully installed '{mod_name}'.", "green") + "\n")
 
         return exit_code
 
@@ -158,12 +170,16 @@ class CelesteModCLI:
             print(f"No mods found.")
             return
 
-        print(f"Found {len(found_mods)} mod(s) :")
-        print("-" * 40)
+        found_mods.sort(key=lambda m: m.submissionFile.downloads, reverse=True)
 
-        for mod in found_mods:
-            mod_db.pretty_print_mod_info(mod)
-            print("-" * 40)
+        with paged_output():
+            print(color(f"Found {len(found_mods)} mod(s) :", "bold"))
+            sep = color("-" * 40, "dim")
+            print(sep)
+
+            for mod in found_mods:
+                mod_db.pretty_print_mod_info(mod)
+                print(sep)
 
     def list_mods(
         self, args: list[str], prog_name: str = "celeste-mod-manager list"
@@ -184,7 +200,8 @@ class CelesteModCLI:
             mods = mod_manager.get_root_mods()
         else:
             mods = mod_manager.get_installed_mods()
-        mod_manager.pretty_print_mods(mods)
+        with paged_output():
+            mod_manager.pretty_print_mods(mods)
 
     def list_tree(
         self, args: list[str], prog_name: str = "celeste-mod-manager list-tree"
@@ -212,9 +229,183 @@ class CelesteModCLI:
         if options.max_depth <= 0:
             print("ERROR: max depth must be a positive integer.", file=sys.stderr)
             return 1
-        mod_manager.analyse_mod_deps(
-            maxdepth=options.max_depth, optional=options.optional_deps
+        with paged_output():
+            mod_manager.analyse_mod_deps(
+                maxdepth=options.max_depth, optional=options.optional_deps
+            )
+        return 0
+
+    @staticmethod
+    def _parse_pattern_args(
+        args: Sequence[str], prog_name: str, action: str
+    ) -> tuple[str | None, int | None]:
+        """Returns ``(pattern_or_none, exit_code_if_should_return)``."""
+        parser = optparse.OptionParser(
+            prog=prog_name,
+            add_help_option=False,
+            usage=f"{prog_name} [PATTERN]",
         )
+        parser.add_option("-h", "--help", action="store_true", dest="help")
+        options, positionals = parser.parse_args(list(args))
+        if options.help:
+            print(
+                textwrap.dedent(
+                    f"""\
+                    Usage:
+                      {prog_name} [PATTERN]
+                        Pick installed mods to {action} from an interactive checkbox.
+                        PATTERN (case-insensitive substring) filters the candidate list.
+                        Mods related by required dependencies are automatically included.
+
+                      {prog_name} --help | -h
+                        Show this help message."""
+                )
+            )
+            return None, 0
+        if len(positionals) > 1:
+            print(
+                f"ERROR: at most one PATTERN allowed, got: {positionals}",
+                file=sys.stderr,
+            )
+            return None, 1
+        return (positionals[0] if positionals else None), None
+
+    @staticmethod
+    def _ask_checkbox(prompt: str, mods: list) -> list | None:
+        """Run questionary checkbox; return None on Ctrl-C / empty."""
+        choices = [
+            questionary.Choice(title=f"{m.name}  ({m.version})", value=m) for m in mods
+        ]
+        try:
+            picked = questionary.checkbox(prompt, choices=choices).ask()
+        except KeyboardInterrupt:
+            return None
+        return picked
+
+    def disable(
+        self, args: Sequence[str], prog_name: str = "celeste-mod-manager disable"
+    ) -> int:
+        """Interactively disable installed mods via blacklist.txt."""
+        pattern, early_exit = self._parse_pattern_args(args, prog_name, "disable")
+        if early_exit is not None:
+            return early_exit
+
+        enabled, _disabled = partition_installed_mods()
+        candidates = [
+            m for m in enabled if pattern is None or pattern.lower() in m.name.lower()
+        ]
+        if not candidates:
+            msg = (
+                f"No enabled mods match '{pattern}'."
+                if pattern
+                else "No enabled mods to disable."
+            )
+            print(color(msg, "yellow"))
+            return 0
+
+        candidates.sort(key=lambda m: m.name.lower())
+        selected = self._ask_checkbox(
+            "Select mods to disable (Space to toggle, Enter to confirm):",
+            candidates,
+        )
+        if not selected:
+            print("Nothing selected. No changes made.")
+            return 0
+
+        full = disable_closure(selected, enabled)
+        extras = [m for m in full if m not in selected]
+        if extras:
+            print(
+                color(
+                    "These mods will also be disabled (they depend on your selection):",
+                    "yellow",
+                )
+            )
+            for m in extras:
+                print(f"  - {color(m.name, 'cyan')} ({color(m.version, 'green')})")
+            try:
+                go = questionary.confirm("Continue?", default=True).ask()
+            except KeyboardInterrupt:
+                go = False
+            if not go:
+                print("Aborted.")
+                return 0
+
+        comments, current = read_blacklist()
+        new_set = current | {blacklist_key(m) for m in full}
+        write_blacklist(comments, new_set)
+
+        print(color(f"Disabled {len(full)} mod(s):", "green"))
+        for m in full:
+            print(f"  - {color(m.name, 'cyan')} ({color(m.version, 'green')})")
+        return 0
+
+    def enable(
+        self, args: Sequence[str], prog_name: str = "celeste-mod-manager enable"
+    ) -> int:
+        """Interactively enable previously-disabled mods."""
+        pattern, early_exit = self._parse_pattern_args(args, prog_name, "enable")
+        if early_exit is not None:
+            return early_exit
+
+        enabled, disabled = partition_installed_mods()
+        candidates = [
+            m for m in disabled if pattern is None or pattern.lower() in m.name.lower()
+        ]
+        if not candidates:
+            msg = (
+                f"No disabled mods match '{pattern}'."
+                if pattern
+                else "No disabled mods to enable."
+            )
+            print(color(msg, "yellow"))
+            return 0
+
+        candidates.sort(key=lambda m: m.name.lower())
+        selected = self._ask_checkbox(
+            "Select mods to enable (Space to toggle, Enter to confirm):",
+            candidates,
+        )
+        if not selected:
+            print("Nothing selected. No changes made.")
+            return 0
+
+        full, missing = enable_closure(selected, disabled, enabled)
+        extras = [m for m in full if m not in selected]
+        if extras:
+            print(
+                color(
+                    "These required deps are currently disabled and will also be enabled:",
+                    "yellow",
+                )
+            )
+            for m in extras:
+                print(f"  - {color(m.name, 'cyan')} ({color(m.version, 'green')})")
+            try:
+                go = questionary.confirm("Continue?", default=True).ask()
+            except KeyboardInterrupt:
+                go = False
+            if not go:
+                print("Aborted.")
+                return 0
+
+        if missing:
+            print(
+                color(
+                    "Warning: required deps are not installed (Everest may refuse to load):",
+                    "yellow",
+                )
+            )
+            for n in missing:
+                print(f"  - {color(n, 'cyan')}")
+
+        comments, current = read_blacklist()
+        new_set = current - {blacklist_key(m) for m in full}
+        write_blacklist(comments, new_set)
+
+        print(color(f"Enabled {len(full)} mod(s):", "green"))
+        for m in full:
+            print(f"  - {color(m.name, 'cyan')} ({color(m.version, 'green')})")
         return 0
 
     def check_updates(self, args: list[str]) -> int:
