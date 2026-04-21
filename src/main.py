@@ -23,6 +23,8 @@ Commands:
     list               List all installed mods.
     list-tree          List all installed mods and their dependencies in a tree format.
     install            Install some mod(s).
+    enable             Enable previously-disabled mods (interactive checkbox).
+    disable            Disable installed mods (interactive checkbox).
     check-updates      Check updates for installed mods.
     update-db          Force update the local mod database from the server.
     upgrade            Upgrade some mod(s) to the latest version.
@@ -128,6 +130,10 @@ def main():
         return cli.list_tree(extra_args, prog_name=f"celeste-mod-manager list-tree")
     elif subcommand == "install":
         return cli.install(extra_args, prog_name=f"celeste-mod-manager install")
+    elif subcommand == "enable":
+        return cli.enable(extra_args, prog_name=f"celeste-mod-manager enable")
+    elif subcommand == "disable":
+        return cli.disable(extra_args, prog_name=f"celeste-mod-manager disable")
     elif subcommand == "check-updates":
         return cli.check_updates(extra_args)
     elif subcommand == "update-db":
