@@ -285,18 +285,29 @@ def _record_root_installed_mod(mod: Mod) -> None:
     else:
         roots = []
 
+    root_entry = {
+        "name": mod.name,
+        "version": mod.version,
+        "filename": mod.get_filename(),
+    }
+
     for recorded_mod in roots:
-        if recorded_mod["name"] == mod.name:
+        if not isinstance(recorded_mod, dict):
+            logger.warning(
+                f"Invalid entry in 'root' list in '{installed_mods_path}': {recorded_mod}"
+            )
+            continue
+        if recorded_mod.get("name") == mod.name:
             logger.debug(
                 f"Mod '{mod.name}' already recorded as root mod. Updating version to '{mod.version}'."
             )
-            recorded_mod["version"] = mod.version
+            recorded_mod.update(root_entry)
             break
     else:
         logger.debug(
             f"Recording '{mod.name}' as a new root mod with version '{mod.version}'."
         )
-        roots.append({"name": mod.name, "version": mod.version})
+        roots.append(root_entry)
 
     data["root"] = roots
     with open(installed_mods_path, "w", encoding="utf-8") as f:
@@ -325,14 +336,28 @@ def get_root_mods() -> list[Mod]:
         installed_mods = get_installed_mods()
         for entry in roots:
             if isinstance(entry, dict) and "name" in entry and "version" in entry:
-                matched_mod = next(
-                    (
-                        mod
-                        for mod in installed_mods
-                        if mod.name == entry["name"] and mod.version == entry["version"]
-                    ),
-                    None,
-                )
+                matched_mod = None
+                filename = entry.get("filename")
+                if isinstance(filename, str):
+                    matched_mod = Mod.from_filename(filename)
+                    if matched_mod and (
+                        matched_mod.name != entry["name"]
+                        or matched_mod.version != entry["version"]
+                    ):
+                        logger.warning(
+                            f"Root mod '{filename}' metadata does not match recorded entry '{entry['name']}' with version '{entry['version']}'."
+                        )
+                        matched_mod = None
+                if not matched_mod:
+                    matched_mod = next(
+                        (
+                            mod
+                            for mod in installed_mods
+                            if mod.name == entry["name"]
+                            and mod.version == entry["version"]
+                        ),
+                        None,
+                    )
                 if matched_mod:
                     mods.append(matched_mod)
                 else:
