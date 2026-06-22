@@ -7,10 +7,9 @@ from loguru import logger
 from . import config
 
 
-def load_mod_cfg(mod_file: str) -> dict | None:
-    filepath = os.path.join(config.MODS_DIR, mod_file)
+def load_mod_cfg(filepath: str) -> dict | None:
     if not os.path.exists(filepath):
-        logger.error(f"Mod file '{mod_file}' not found.")
+        logger.error(f"Mod file '{filepath}' not found.")
         return None
 
     try:
@@ -25,14 +24,22 @@ def load_mod_cfg(mod_file: str) -> dict | None:
             )
             if yaml_filename:
                 with zf.open(yaml_filename) as f:
-                    return yaml.safe_load(f)[
-                        0
-                    ]  # Assuming the YAML file contains a list and we want the first item
+                    data = yaml.safe_load(f)
+                    if (
+                        not isinstance(data, list)
+                        or not data
+                        or not isinstance(data[0], dict)
+                    ):
+                        logger.warning(
+                            f"Unexpected everest.yaml format in '{filepath}'."
+                        )
+                        return None
+                    return data[0]
             else:
-                logger.warning(f"No everest.yaml found in '{mod_file}'.")
+                logger.warning(f"No everest.yaml found in '{filepath}'.")
                 return None
     except Exception as e:
-        logger.error(f"Failed to read from '{mod_file}': {e}")
+        logger.error(f"Failed to read from '{filepath}': {e}")
         return None
 
 
@@ -40,48 +47,57 @@ def load_mod_cfg(mod_file: str) -> dict | None:
 class Mod:
     name: str
     version: str
+    filepath: str
 
-    def __init__(self, name: str, version: str):
+    def __init__(self, name: str, version: str, filepath: str):
         self.name = name
         self.version = version
+        self.filepath = filepath
 
-    # REVIEW: currently we initialize a Mod instance from a filename, but it
-    # might be more robust to read the everest.yaml inside the zip to get
-    # accurate metadata.
     @staticmethod
     def from_filename(filename: str) -> "Mod | None":
         filepath = os.path.join(config.MODS_DIR, filename)
+
         if not os.path.exists(filepath):
             logger.error(f"File '{filepath}' does not exist.")
             return None
-        if filename.endswith(".zip"):
-            name_version = filename[:-4].split("-", 1)
-            if len(name_version) == 2:
-                name, version = name_version
-                return Mod(name=name, version=version)
-        logger.error(
-            f"Filename '{filename}' does not match expected format 'Name-Version.zip'."
-        )
-        return None
+
+        if not os.path.isfile(filepath) or not filepath.lower().endswith(".zip"):
+            logger.error(f"File '{filepath}' is not a zip mod file.")
+            return None
+
+        cfg = load_mod_cfg(filepath)
+        if not cfg:
+            return None
+
+        name = cfg.get("Name")
+        version = cfg.get("Version")
+        if not name or not version:
+            logger.warning(f"Missing Name or Version in '{filepath}'.")
+            return None
+
+        return Mod(name=str(name), version=str(version), filepath=filepath)
 
     def get_filename(self) -> str:
-        return f"{self.name}-{self.version}.zip"
+        return os.path.basename(self.filepath)
 
     def get_filepath(self) -> str:
-        return os.path.join(config.MODS_DIR, self.get_filename())
+        return self.filepath
 
     def __repr__(self):
-        return f"Mod(name='{self.name}', version='{self.version}')"
+        return (
+            f"Mod(name='{self.name}', version='{self.version}', "
+            f"filepath='{self.filepath}')"
+        )
 
     def load_everest_yaml(self) -> dict | None:
-        mod_file = self.get_filepath()
-        return load_mod_cfg(mod_file)
+        return load_mod_cfg(self.filepath)
 
     def get_mod_deps(self, optional: bool = False) -> list[dict[str, str]]:
         cfg = self.load_everest_yaml()
         if not cfg:
             logger.critical(
-                f"Failed to load everest.yaml for mod '{self.get_filename()}'. Cannot determine dependencies."
+                f"Failed to load everest.yaml for mod '{self.filepath}'. Cannot determine dependencies."
             )
             sys.exit(1)
         else:

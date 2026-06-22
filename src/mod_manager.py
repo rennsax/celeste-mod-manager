@@ -25,7 +25,17 @@ def _download_mod(mod_info: ModInfo) -> Mod | None:
     try:
         urllib.request.urlretrieve(url, filepath)
         logger.info(f"Downloaded '{filename}' successfully.")
-        return Mod(name=mod_info.name, version=mod_info.version)
+        mod = Mod.from_filename(filename)
+        if not mod:
+            logger.error(f"Downloaded '{filename}' is not a valid mod archive.")
+            return None
+        if mod.name != mod_info.name or mod.version != mod_info.version:
+            logger.warning(
+                f"Downloaded mod metadata mismatch for '{filename}': "
+                f"database={mod_info.name} {mod_info.version}, "
+                f"archive={mod.name} {mod.version}"
+            )
+        return mod
     except Exception as e:
         logger.error(f"Failed to download '{filename}': {e}")
         # remove the file if it was partially downloaded
@@ -40,7 +50,8 @@ def get_installed_mods() -> list[Mod]:
     mods = []
     files = [f for f in os.listdir(config.MODS_DIR) if f != "Cache"]
     for filename in files:
-        if filename.endswith(".zip"):
+        filepath = os.path.join(config.MODS_DIR, filename)
+        if os.path.isfile(filepath) and filename.lower().endswith(".zip"):
             mod = Mod.from_filename(filename)
             if mod:
                 mods.append(mod)
@@ -311,9 +322,23 @@ def get_root_mods() -> list[Mod]:
             )
             return []
         mods = []
+        installed_mods = get_installed_mods()
         for entry in roots:
             if isinstance(entry, dict) and "name" in entry and "version" in entry:
-                mods.append(Mod(name=entry["name"], version=entry["version"]))
+                matched_mod = next(
+                    (
+                        mod
+                        for mod in installed_mods
+                        if mod.name == entry["name"] and mod.version == entry["version"]
+                    ),
+                    None,
+                )
+                if matched_mod:
+                    mods.append(matched_mod)
+                else:
+                    logger.warning(
+                        f"Root mod '{entry['name']}' with version '{entry['version']}' is not installed."
+                    )
             else:
                 logger.warning(
                     f"Invalid entry in 'root' list in '{installed_mods_path}': {entry}"
@@ -376,7 +401,8 @@ def update_mod(mod: Mod) -> tuple[Mod | None, UpdateModStatus]:
         updated_mod = _download_mod(mod_info)
         if updated_mod is None:
             return None, UpdateModStatus.DOWNLOAD_FAILED
-        os.remove(mod.get_filepath())
+        if updated_mod.filepath != mod.filepath:
+            os.remove(mod.filepath)
         for root_mod in root_mods:
             if root_mod.name == mod.name:
                 _record_root_installed_mod(updated_mod)
