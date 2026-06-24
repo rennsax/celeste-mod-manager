@@ -211,14 +211,19 @@ def analyse_mod_deps(maxdepth: int, optional: bool = False):
     recorded_root_names = set()
     if config._ENABLE_ROOT_INSTALL_TRACK:
         recorded_root_names = {mod.name for mod in get_root_mods()}
+    orphan_roots = (
+        {root for root in roots if root not in recorded_root_names}
+        if config._ENABLE_ROOT_INSTALL_TRACK
+        else set()
+    )
 
     def print_tree(
         node, prefix="", is_last=True, is_root=False, is_opt=False, current_depth=1
     ):
         if is_root:
             display_node = f"{node} ({installed_dict[node].version})"
-            if config._ENABLE_ROOT_INSTALL_TRACK and node not in recorded_root_names:
-                display_node = f"{display_node} \033[1;91m[ORPHAN]\033[0m"
+            if node in orphan_roots:
+                display_node = f"{display_node} \033[1;33m[ORPHAN]\033[0m"
             print(display_node)
             new_prefix = prefix
         else:
@@ -255,6 +260,16 @@ def analyse_mod_deps(maxdepth: int, optional: bool = False):
         print_tree(roots[i], is_root=True)
         if i < len(roots) - 1:
             print()
+
+    if orphan_roots:
+        print()
+        print("\033[1;33mWARNING:\033[0m Orphan root mod(s) detected:")
+        for mod_name in sorted(orphan_roots, key=str.lower):
+            print(f"  - {mod_name}")
+        print(
+            "Use `celeste-mod-manager install MOD...' to record them as root mods,\n"
+            " or `celeste-mod-manager uninstall MOD...' to remove them."
+        )
 
 
 class EnsureModStatus(Enum):
