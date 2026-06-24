@@ -280,12 +280,17 @@ class EnsureModStatus(Enum):
     UNEXPECTED = "unexpected"
 
 
+def _get_installed_mods_record_path(for_write: bool = False) -> str:
+    installed_mods_path = os.path.join(config.MODS_DIR, "installed_mods.yml")
+    return installed_mods_path
+
+
 def _record_root_installed_mod(mod: Mod) -> None:
     if not config._ENABLE_ROOT_INSTALL_TRACK:
         return
 
     logger.debug(f"Try to record root mod '{mod.name}' with version '{mod.version}'.")
-    installed_mods_path = os.path.join(config.MODS_DIR, "installed_mods.yaml")
+    installed_mods_path = _get_installed_mods_record_path(for_write=True)
 
     data: dict = {}
     roots = None
@@ -340,7 +345,7 @@ def _remove_root_installed_mods(mod_names: set[str]) -> None:
     if not config._ENABLE_ROOT_INSTALL_TRACK:
         return
 
-    installed_mods_path = os.path.join(config.MODS_DIR, "installed_mods.yaml")
+    installed_mods_path = _get_installed_mods_record_path()
     if not os.path.exists(installed_mods_path):
         return
 
@@ -370,7 +375,7 @@ def _remove_root_installed_mods(mod_names: set[str]) -> None:
 
 
 def get_root_mods() -> list[Mod]:
-    installed_mods_path = os.path.join(config.MODS_DIR, "installed_mods.yaml")
+    installed_mods_path = _get_installed_mods_record_path()
     if not os.path.exists(installed_mods_path):
         return []
 
