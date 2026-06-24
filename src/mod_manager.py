@@ -208,11 +208,18 @@ def analyse_mod_deps(maxdepth: int, optional: bool = False):
     roots = [node for node in graph if in_degree.get(node) == 0]
     roots.sort(key=lambda x: x.lower())
 
+    recorded_root_names = set()
+    if config._ENABLE_ROOT_INSTALL_TRACK:
+        recorded_root_names = {mod.name for mod in get_root_mods()}
+
     def print_tree(
         node, prefix="", is_last=True, is_root=False, is_opt=False, current_depth=1
     ):
         if is_root:
-            print(f"{node} ({installed_dict[node].version})")
+            display_node = f"{node} ({installed_dict[node].version})"
+            if config._ENABLE_ROOT_INSTALL_TRACK and node not in recorded_root_names:
+                display_node = f"{display_node} \033[1;91m[ORPHAN]\033[0m"
+            print(display_node)
             new_prefix = prefix
         else:
             connector = "└── " if is_last else "├── "
@@ -314,6 +321,39 @@ def _record_root_installed_mod(mod: Mod) -> None:
         yaml.safe_dump(data, f, sort_keys=False, allow_unicode=True)
 
 
+def _remove_root_installed_mods(mod_names: set[str]) -> None:
+    if not config._ENABLE_ROOT_INSTALL_TRACK:
+        return
+
+    installed_mods_path = os.path.join(config.MODS_DIR, "installed_mods.yaml")
+    if not os.path.exists(installed_mods_path):
+        return
+
+    with open(installed_mods_path, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+    if not isinstance(data, dict):
+        logger.warning(
+            f"Unexpected format in '{installed_mods_path}'. No root mods removed."
+        )
+        return
+
+    roots = data.get("root", [])
+    if not isinstance(roots, list):
+        logger.warning(
+            f"Unexpected format for 'root' in '{installed_mods_path}'. No root mods removed."
+        )
+        return
+
+    data["root"] = [
+        entry
+        for entry in roots
+        if not isinstance(entry, dict) or entry.get("name") not in mod_names
+    ]
+
+    with open(installed_mods_path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(data, f, sort_keys=False, allow_unicode=True)
+
+
 def get_root_mods() -> list[Mod]:
     installed_mods_path = os.path.join(config.MODS_DIR, "installed_mods.yaml")
     if not os.path.exists(installed_mods_path):
@@ -369,6 +409,86 @@ def get_root_mods() -> list[Mod]:
                     f"Invalid entry in 'root' list in '{installed_mods_path}': {entry}"
                 )
         return mods
+
+
+class UninstallModStatus(Enum):
+    READY = "ready"
+    ROOT_TRACK_DISABLED = "root_track_disabled"
+    NOT_INSTALLED = "not_installed"
+    NOT_RECORDED_ROOT = "not_recorded_root"
+    UNEXPECTED = "unexpected"
+
+
+def build_uninstall_plan(mod_name: str) -> tuple[list[Mod], UninstallModStatus]:
+    if not config._ENABLE_ROOT_INSTALL_TRACK:
+        return [], UninstallModStatus.ROOT_TRACK_DISABLED
+
+    try:
+        installed_mods = get_installed_mods()
+        installed_dict = {mod.name: mod for mod in installed_mods}
+        if mod_name not in installed_dict:
+            return [], UninstallModStatus.NOT_INSTALLED
+
+        root_names = {mod.name for mod in get_root_mods()}
+        if mod_name not in root_names:
+            return [], UninstallModStatus.NOT_RECORDED_ROOT
+
+        graph: dict[str, set[str]] = {mod.name: set() for mod in installed_mods}
+        reverse_graph: dict[str, set[str]] = {mod.name: set() for mod in installed_mods}
+        for mod in installed_mods:
+            for dep in mod.get_mod_deps(optional=True):
+                dep_name = dep.get("Name")
+                if (
+                    not dep_name
+                    or dep_name in ["Everest", "Celeste", "EverestCore"]
+                    or dep_name not in installed_dict
+                ):
+                    continue
+                graph[mod.name].add(dep_name)
+                reverse_graph[dep_name].add(mod.name)
+
+        uninstall_names = {mod_name}
+        pending = [mod_name]
+        while pending:
+            current = pending.pop()
+            for dep_name in graph.get(current, set()):
+                if dep_name in uninstall_names or dep_name in root_names:
+                    continue
+                dependents = reverse_graph.get(dep_name, set())
+                if dependents and dependents.issubset(uninstall_names):
+                    uninstall_names.add(dep_name)
+                    pending.append(dep_name)
+
+        uninstall_mods = [installed_dict[mod_name]]
+        uninstall_mods.extend(
+            sorted(
+                (
+                    installed_dict[name]
+                    for name in uninstall_names
+                    if name != mod_name
+                ),
+                key=lambda mod: mod.name.lower(),
+            )
+        )
+        return uninstall_mods, UninstallModStatus.READY
+    except Exception as e:
+        logger.error(f"Failed to build uninstall plan for mod '{mod_name}': {e}")
+        return [], UninstallModStatus.UNEXPECTED
+
+
+def uninstall_mods(mods: list[Mod]) -> bool:
+    try:
+        root_names = {mod.name for mod in get_root_mods()}
+        for mod in mods:
+            if os.path.exists(mod.filepath):
+                os.remove(mod.filepath)
+            else:
+                logger.warning(f"Mod file '{mod.filepath}' does not exist.")
+        _remove_root_installed_mods({mod.name for mod in mods if mod.name in root_names})
+        return True
+    except Exception as e:
+        logger.error(f"Failed to uninstall mods: {e}")
+        return False
 
 
 def ensure_mod(mod_name: str, root: bool = False) -> tuple[Mod | None, EnsureModStatus]:
