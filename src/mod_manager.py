@@ -156,12 +156,23 @@ def analyse_mod_deps(maxdepth: int, optional: bool = False):
     installed_dict = {mod.name: mod for mod in mods}
     graph = {}
     in_degree = {mod.name: 0 for mod in mods}
+    optional_dependents: dict[str, set[str]] = {mod.name: set() for mod in mods}
 
     for mod in mods:
         graph[mod.name] = []
-        deps = mod.get_mod_deps(optional=optional)
         required_deps = mod.get_mod_deps(optional=False)
         required_names = {d.get("Name") for d in required_deps if d.get("Name")}
+        optional_deps = [
+            dep
+            for dep in mod.get_mod_deps(optional=True)
+            if dep.get("Name") not in required_names
+        ]
+        deps = required_deps + (optional_deps if optional else [])
+
+        for dep in optional_deps:
+            dep_name = dep.get("Name")
+            if dep_name in installed_dict:
+                optional_dependents[dep_name].add(mod.name)
 
         for dep in deps:
             dep_name = dep["Name"]
@@ -172,7 +183,7 @@ def analyse_mod_deps(maxdepth: int, optional: bool = False):
 
             if dep_name in installed_dict:
                 graph[mod.name].append((dep_name, is_opt))
-                if not is_opt:
+                if not is_opt or optional:
                     in_degree[dep_name] = in_degree.get(dep_name, 0) + 1
             else:
                 graph[mod.name].append((f"{dep_name} (Missing)", is_opt))
@@ -212,7 +223,11 @@ def analyse_mod_deps(maxdepth: int, optional: bool = False):
     if config._ENABLE_ROOT_INSTALL_TRACK:
         recorded_root_names = {mod.name for mod in get_root_mods()}
     orphan_roots = (
-        {root for root in roots if root not in recorded_root_names}
+        {
+            root
+            for root in roots
+            if root not in recorded_root_names and not optional_dependents[root]
+        }
         if config._ENABLE_ROOT_INSTALL_TRACK
         else set()
     )
@@ -224,6 +239,13 @@ def analyse_mod_deps(maxdepth: int, optional: bool = False):
             display_node = f"{node} ({installed_dict[node].version})"
             if node in orphan_roots:
                 display_node = f"{display_node} \033[1;33m[ORPHAN]\033[0m"
+            if node in optional_dependents and optional_dependents[node]:
+                dependents = ", ".join(
+                    sorted(optional_dependents[node], key=str.lower)
+                )
+                display_node = (
+                    f"{display_node} (optionally depended by {dependents})"
+                )
             print(display_node)
             new_prefix = prefix
         else:
