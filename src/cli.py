@@ -309,28 +309,30 @@ class CelesteModCLI:
             )
             return 1
 
-        exit_code = 0
+        planned_mods_by_name: dict[str, mod_manager.Mod] = {}
+        skipped_mods = 0
+        valid_mod_names = []
         for mod_name in positionals:
             mods_to_uninstall, status = mod_manager.build_uninstall_plan(
                 mod_name, force=options.force
             )
             if status == mod_manager.UninstallModStatus.NOT_INSTALLED:
                 print(f"ERROR: mod '{mod_name}' is not installed.", file=sys.stderr)
-                exit_code = 1
+                skipped_mods += 1
                 continue
             if status == mod_manager.UninstallModStatus.NOT_RECORDED_ROOT:
                 print(
                     f"ERROR: mod '{mod_name}' is not a recorded root mod. Uninstalling it may break other installed mods.",
                     file=sys.stderr,
                 )
-                exit_code = 1
+                skipped_mods += 1
                 continue
             if status == mod_manager.UninstallModStatus.UNEXPECTED:
                 print(
                     f"ERROR: failed to build uninstall plan for mod '{mod_name}'.",
                     file=sys.stderr,
                 )
-                exit_code = 1
+                skipped_mods += 1
                 continue
             if status == mod_manager.UninstallModStatus.ROOT_TRACK_DISABLED:
                 print(
@@ -339,30 +341,38 @@ class CelesteModCLI:
                 )
                 return 1
 
-            if options.force:
-                print(
-                    f"Force uninstall is enabled. The following mod will be uninstalled for '{mod_name}':"
-                )
-            else:
-                print(f"The following mod(s) will be uninstalled for '{mod_name}':")
+            valid_mod_names.append(mod_name)
             for mod in mods_to_uninstall:
-                print(f"  - {mod.name} (v{mod.version}) [{mod.get_filename()}]")
+                planned_mods_by_name[mod.name] = mod
 
-            answer = input("Proceed? [y/N] ").strip().lower()
-            if answer not in ("y", "yes"):
-                print(f"Skipped uninstalling '{mod_name}'.")
-                continue
+        if not planned_mods_by_name:
+            print("ERROR: no valid mod specified to uninstall.", file=sys.stderr)
+            return 1
 
-            if mod_manager.uninstall_mods(mods_to_uninstall):
-                print(f"Successfully uninstalled '{mod_name}'.")
-            else:
-                print(
-                    f"ERROR: failed to uninstall '{mod_name}'.",
-                    file=sys.stderr,
-                )
-                exit_code = 1
+        mods_to_uninstall = sorted(
+            planned_mods_by_name.values(), key=lambda mod: mod.name.lower()
+        )
+        requested_mods = ", ".join(valid_mod_names)
+        if options.force:
+            print(
+                f"Force uninstall is enabled. The following mod(s) will be uninstalled for: {requested_mods}"
+            )
+        else:
+            print(f"The following mod(s) will be uninstalled for: {requested_mods}")
+        for mod in mods_to_uninstall:
+            print(f"  - {mod.name} (v{mod.version}) [{mod.get_filename()}]")
 
-        return exit_code
+        answer = input("Proceed? [y/N] ").strip().lower()
+        if answer not in ("y", "yes"):
+            print("Skipped uninstalling mods.")
+            return 0
+
+        if mod_manager.uninstall_mods(mods_to_uninstall):
+            print("Successfully uninstalled mods.")
+            return 1 if skipped_mods else 0
+
+        print("ERROR: failed to uninstall mods.", file=sys.stderr)
+        return 1
 
     def upgrade(
         self, args: list[str], prog_name: str = "celeste-mod-manager upgrade"

@@ -58,6 +58,91 @@ def get_installed_mods() -> list[Mod]:
     return mods
 
 
+def get_mod_dependency_closure(
+    mod: Mod, optional: bool = False, _visited: set[str] | None = None
+) -> list[Mod]:
+    if _visited is None:
+        _visited = set()
+
+    if mod.name in _visited:
+        return []
+    _visited.add(mod.name)
+
+    closure = [mod]
+    installed_mods = get_installed_mods()
+    installed_dict = {
+        installed_mod.name: installed_mod for installed_mod in installed_mods
+    }
+
+    for dep in mod.get_mod_deps(optional=optional):
+        dep_name = dep.get("Name")
+        if (
+            not dep_name
+            or dep_name in ["Everest", "Celeste", "EverestCore"]
+            or dep_name not in installed_dict
+        ):
+            continue
+
+        closure.extend(
+            get_mod_dependency_closure(
+                installed_dict[dep_name], optional=optional, _visited=_visited
+            )
+        )
+
+    return closure
+
+
+def get_mods_exclusively_depending_on_closure(mod: Mod) -> list[Mod]:
+    installed_mods = get_installed_mods()
+    installed_dict = {
+        installed_mod.name: installed_mod for installed_mod in installed_mods
+    }
+    root_names = {root_mod.name for root_mod in get_root_mods()}
+
+    reverse_graph: dict[str, set[str]] = {
+        installed_mod.name: set() for installed_mod in installed_mods
+    }
+    for installed_mod in installed_mods:
+        for dep in installed_mod.get_mod_deps(optional=True):
+            dep_name = dep.get("Name")
+            if (
+                not dep_name
+                or dep_name in ["Everest", "Celeste", "EverestCore"]
+                or dep_name not in installed_dict
+            ):
+                continue
+            reverse_graph[dep_name].add(installed_mod.name)
+
+    closure_names = {
+        closure_mod.name
+        for closure_mod in get_mod_dependency_closure(mod, optional=True)
+    }
+    changed = True
+    while changed:
+        changed = False
+        for name in list(closure_names):
+            if name == mod.name:
+                continue
+            if name in root_names or not reverse_graph.get(name, set()).issubset(
+                closure_names
+            ):
+                closure_names.remove(name)
+                changed = True
+
+    result = [installed_dict[mod.name]]
+    result.extend(
+        sorted(
+            (
+                installed_dict[name]
+                for name in closure_names
+                if name != mod.name
+            ),
+            key=lambda installed_mod: installed_mod.name.lower(),
+        )
+    )
+    return result
+
+
 def resolve_deps(
     mod: Mod, optional: bool = False, _visited: set | None = None
 ) -> tuple[list[Mod], list[str]]:
@@ -479,44 +564,10 @@ def build_uninstall_plan(
                 return [installed_dict[mod_name]], UninstallModStatus.READY
             return [], UninstallModStatus.NOT_RECORDED_ROOT
 
-        graph: dict[str, set[str]] = {mod.name: set() for mod in installed_mods}
-        reverse_graph: dict[str, set[str]] = {mod.name: set() for mod in installed_mods}
-        for mod in installed_mods:
-            for dep in mod.get_mod_deps(optional=True):
-                dep_name = dep.get("Name")
-                if (
-                    not dep_name
-                    or dep_name in ["Everest", "Celeste", "EverestCore"]
-                    or dep_name not in installed_dict
-                ):
-                    continue
-                graph[mod.name].add(dep_name)
-                reverse_graph[dep_name].add(mod.name)
-
-        uninstall_names = {mod_name}
-        pending = [mod_name]
-        while pending:
-            current = pending.pop()
-            for dep_name in graph.get(current, set()):
-                if dep_name in uninstall_names or dep_name in root_names:
-                    continue
-                dependents = reverse_graph.get(dep_name, set())
-                if dependents and dependents.issubset(uninstall_names):
-                    uninstall_names.add(dep_name)
-                    pending.append(dep_name)
-
-        uninstall_mods = [installed_dict[mod_name]]
-        uninstall_mods.extend(
-            sorted(
-                (
-                    installed_dict[name]
-                    for name in uninstall_names
-                    if name != mod_name
-                ),
-                key=lambda mod: mod.name.lower(),
-            )
+        return (
+            get_mods_exclusively_depending_on_closure(installed_dict[mod_name]),
+            UninstallModStatus.READY,
         )
-        return uninstall_mods, UninstallModStatus.READY
     except Exception as e:
         logger.error(f"Failed to build uninstall plan for mod '{mod_name}': {e}")
         return [], UninstallModStatus.UNEXPECTED
