@@ -439,7 +439,9 @@ class UninstallModStatus(Enum):
     UNEXPECTED = "unexpected"
 
 
-def build_uninstall_plan(mod_name: str) -> tuple[list[Mod], UninstallModStatus]:
+def build_uninstall_plan(
+    mod_name: str, force: bool = False
+) -> tuple[list[Mod], UninstallModStatus]:
     if not config._ENABLE_ROOT_INSTALL_TRACK:
         return [], UninstallModStatus.ROOT_TRACK_DISABLED
 
@@ -451,6 +453,8 @@ def build_uninstall_plan(mod_name: str) -> tuple[list[Mod], UninstallModStatus]:
 
         root_names = {mod.name for mod in get_root_mods()}
         if mod_name not in root_names:
+            if force:
+                return [installed_dict[mod_name]], UninstallModStatus.READY
             return [], UninstallModStatus.NOT_RECORDED_ROOT
 
         graph: dict[str, set[str]] = {mod.name: set() for mod in installed_mods}

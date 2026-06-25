@@ -288,7 +288,15 @@ class CelesteModCLI:
     ) -> int:
         """Uninstall root mod(s) and dependencies that only they require."""
         parser = optparse.OptionParser(prog=prog_name)
-        _, positionals = parser.parse_args(list(args))
+        parser.add_option(
+            "-f",
+            "--force",
+            action="store_true",
+            dest="force",
+            default=False,
+            help="Force uninstall specified mod(s), even if they are not root mods.",
+        )
+        options, positionals = parser.parse_args(list(args))
 
         if len(positionals) == 0:
             print("ERROR: no mod specified to uninstall.", file=sys.stderr)
@@ -303,7 +311,9 @@ class CelesteModCLI:
 
         exit_code = 0
         for mod_name in positionals:
-            mods_to_uninstall, status = mod_manager.build_uninstall_plan(mod_name)
+            mods_to_uninstall, status = mod_manager.build_uninstall_plan(
+                mod_name, force=options.force
+            )
             if status == mod_manager.UninstallModStatus.NOT_INSTALLED:
                 print(f"ERROR: mod '{mod_name}' is not installed.", file=sys.stderr)
                 exit_code = 1
@@ -329,7 +339,12 @@ class CelesteModCLI:
                 )
                 return 1
 
-            print(f"The following mod(s) will be uninstalled for '{mod_name}':")
+            if options.force:
+                print(
+                    f"Force uninstall is enabled. The following mod will be uninstalled for '{mod_name}':"
+                )
+            else:
+                print(f"The following mod(s) will be uninstalled for '{mod_name}':")
             for mod in mods_to_uninstall:
                 print(f"  - {mod.name} (v{mod.version}) [{mod.get_filename()}]")
 
