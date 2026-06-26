@@ -15,6 +15,7 @@ class CelesteModCLI:
     def _install_mod(
         self, mod_name: str, no_dep: bool = False, optional_deps: bool = False
     ) -> bool:
+        print(f"Processing {mod_name}")
         mod, _status = mod_manager.ensure_mod(mod_name, root=True)
         if not mod:
             if _status == EnsureModStatus.NOT_FOUND_IN_DB:
@@ -30,19 +31,22 @@ class CelesteModCLI:
         assert _status in {EnsureModStatus.INSTALLED, EnsureModStatus.ALREADY_EXISTS}
 
         if _status == EnsureModStatus.ALREADY_EXISTS:
-            print(f"Mod '{mod_name}' already exists locally.")
+            print(f"Requirement already satisfied: {mod.name} ({mod.version})")
 
         if no_dep:
             return True
 
+        print(f"Installing dependencies for {mod.name}")
         resolved_deps, failed_deps = mod_manager.resolve_deps(
             mod, optional=optional_deps
         )
         if len(resolved_deps) != 0:
-            print("Also install the following dependencies:")
+            print("Installed dependencies:")
             for dep in resolved_deps:
                 print(f"  - {dep.name} (v{dep.version})")
             print()
+        elif len(failed_deps) == 0:
+            print("No dependencies to install.")
         if len(failed_deps) != 0:
             failed_deps_str = ", ".join(str(mod) for mod in failed_deps)
             print(
@@ -135,7 +139,6 @@ class CelesteModCLI:
 
         exit_code = 0
         for mod_name in mods_to_install:
-            print(f"Try to install mod '{mod_name}'...")
             if not self._install_mod(
                 mod_name, no_dep=options.no_deps, optional_deps=options.optional_deps
             ):

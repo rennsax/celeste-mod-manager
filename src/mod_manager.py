@@ -1,6 +1,7 @@
 import os
 import sys
 import urllib.request
+import time
 from enum import Enum
 import yaml
 from loguru import logger
@@ -8,6 +9,56 @@ from loguru import logger
 from . import config
 from .mod import Mod
 from .mod_db import ModInfo, get_mod_info
+
+
+def _format_size(num_bytes: int | float | None) -> str:
+    if not num_bytes or num_bytes < 0:
+        return "unknown size"
+
+    value = float(num_bytes)
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1024 or unit == "GB":
+            if unit == "B":
+                return f"{int(value)} {unit}"
+            return f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} GB"
+
+
+def _make_download_reporthook(expected_size: int | None = None):
+    start_time = time.monotonic()
+    last_rendered_percent = -1
+
+    def reporthook(block_count: int, block_size: int, total_size: int):
+        nonlocal last_rendered_percent
+
+        downloaded = block_count * block_size
+        effective_total = total_size if total_size and total_size > 0 else expected_size
+        if effective_total and effective_total > 0:
+            downloaded = min(downloaded, effective_total)
+            percent = min(100, int(downloaded * 100 / effective_total))
+            if percent == last_rendered_percent and percent != 100:
+                return
+            last_rendered_percent = percent
+
+            filled = int(30 * percent / 100)
+            bar = "█" * filled + "░" * (30 - filled)
+            elapsed = max(time.monotonic() - start_time, 0.001)
+            speed = _format_size(downloaded / elapsed) + "/s"
+            print(
+                "\r"
+                f"  {bar} {percent:3d}% "
+                f"{_format_size(downloaded)}/{_format_size(effective_total)} "
+                f"{speed}",
+                end="",
+                flush=True,
+            )
+            if percent >= 100:
+                print()
+        else:
+            print(f"\r  Downloaded {_format_size(downloaded)}", end="", flush=True)
+
+    return reporthook
 
 
 def _download_mod(mod_info: ModInfo) -> Mod | None:
@@ -21,10 +72,16 @@ def _download_mod(mod_info: ModInfo) -> Mod | None:
 
     os.makedirs(config.MODS_DIR, exist_ok=True)
 
-    logger.info(f"Downloading '{mod_info.name}' from '{url}'...")
+    expected_size = mod_info.submissionFile.size
+    print(f"Collecting {mod_info.name}")
+    print(f"  Downloading {filename} ({_format_size(expected_size)})")
+    logger.debug(f"Downloading '{mod_info.name}' from '{url}'...")
     try:
-        urllib.request.urlretrieve(url, filepath)
-        logger.info(f"Downloaded '{filename}' successfully.")
+        urllib.request.urlretrieve(
+            url, filepath, reporthook=_make_download_reporthook(expected_size)
+        )
+        print(f"  Saved {filename}")
+        logger.debug(f"Downloaded '{filename}' successfully.")
         mod = Mod.from_filename(filename)
         if not mod:
             logger.error(f"Downloaded '{filename}' is not a valid mod archive.")
@@ -180,6 +237,7 @@ def resolve_deps(
         if dep_name in _visited:
             continue
 
+        print(f"  Resolving dependency {dep_name} ({dep_version})")
         installed_mods = get_installed_mods()
         found_mods = [m for m in installed_mods if m.name == dep_name]
 
@@ -190,6 +248,10 @@ def resolve_deps(
             failed_deps.append(dep_name)
         elif len(found_mods) == 1:
             dep_mod = found_mods[0]
+            print(
+                f"  Requirement already satisfied: {dep_mod.name} "
+                f"({dep_mod.version})"
+            )
             if dep_mod.version != dep_version:
                 logger.warning(
                     f"Version mismatch for '{dep_name}': required {dep_version}, found {dep_mod.version}"
@@ -200,7 +262,10 @@ def resolve_deps(
             resolved_deps.extend(sub_resolved)
             failed_deps.extend(sub_failed)
         else:
-            logger.info(f"Dependency '{dep_name}' not found locally. Try to resolve...")
+            print(f"  Downloading dependency {dep_name}")
+            logger.debug(
+                f"Dependency '{dep_name}' not found locally. Try to resolve..."
+            )
             mod_info = get_mod_info(dep_name)
             if not mod_info:
                 logger.error(f"Dependency '{dep_name}' not found in the database.")
