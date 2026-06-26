@@ -61,6 +61,21 @@ def get_installed_mods() -> list[Mod]:
 def get_mod_dependency_closure(
     mod: Mod, optional: bool = False, _visited: set[str] | None = None
 ) -> list[Mod]:
+    installed_mods = get_installed_mods()
+    installed_dict = {
+        installed_mod.name: installed_mod for installed_mod in installed_mods
+    }
+    return _get_mod_dependency_closure_from_installed_dict(
+        mod, installed_dict, optional=optional, _visited=_visited
+    )
+
+
+def _get_mod_dependency_closure_from_installed_dict(
+    mod: Mod,
+    installed_dict: dict[str, Mod],
+    optional: bool = False,
+    _visited: set[str] | None = None,
+) -> list[Mod]:
     if _visited is None:
         _visited = set()
 
@@ -69,11 +84,6 @@ def get_mod_dependency_closure(
     _visited.add(mod.name)
 
     closure = [mod]
-    installed_mods = get_installed_mods()
-    installed_dict = {
-        installed_mod.name: installed_mod for installed_mod in installed_mods
-    }
-
     for dep in mod.get_mod_deps(optional=optional):
         dep_name = dep.get("Name")
         if (
@@ -84,8 +94,11 @@ def get_mod_dependency_closure(
             continue
 
         closure.extend(
-            get_mod_dependency_closure(
-                installed_dict[dep_name], optional=optional, _visited=_visited
+            _get_mod_dependency_closure_from_installed_dict(
+                installed_dict[dep_name],
+                installed_dict,
+                optional=optional,
+                _visited=_visited,
             )
         )
 
@@ -652,37 +665,12 @@ def _get_mod_dependency_closure_from_available_mods(
     optional: bool = False,
     _visited: set[str] | None = None,
 ) -> list[Mod]:
-    if _visited is None:
-        _visited = set()
-
-    if mod.name in _visited:
-        return []
-    _visited.add(mod.name)
-
     available_dict = {
         available_mod.name: available_mod for available_mod in available_mods
     }
-    closure = [mod]
-
-    for dep in mod.get_mod_deps(optional=optional):
-        dep_name = dep.get("Name")
-        if (
-            not dep_name
-            or dep_name in ["Everest", "Celeste", "EverestCore"]
-            or dep_name not in available_dict
-        ):
-            continue
-
-        closure.extend(
-            _get_mod_dependency_closure_from_available_mods(
-                available_dict[dep_name],
-                available_mods,
-                optional=optional,
-                _visited=_visited,
-            )
-        )
-
-    return closure
+    return _get_mod_dependency_closure_from_installed_dict(
+        mod, available_dict, optional=optional, _visited=_visited
+    )
 
 
 class ModToggleStatus(Enum):
@@ -781,7 +769,9 @@ def build_enable_plan(mod_name: str) -> tuple[list[Mod], ModToggleStatus]:
 
         target_mod = installed_dict[mod_name]
         blacklisted_filenames = get_blacklisted_mod_filenames()
-        closure = get_mod_dependency_closure(target_mod, optional=True)
+        closure = _get_mod_dependency_closure_from_installed_dict(
+            target_mod, installed_dict, optional=True
+        )
         mods_to_enable = [
             mod for mod in closure if not _is_mod_enabled(mod, blacklisted_filenames)
         ]
