@@ -177,6 +177,13 @@ class CelesteModCLI:
             default=False,
             help="Only list root mods (i.e. mods that are directly installed by the user).",
         )
+        parser.add_option(
+            "--enabled",
+            action="store_true",
+            dest="enabled_only",
+            default=False,
+            help="Only list enabled mods.",
+        )
         options, _ = parser.parse_args(args)
         mods = []
         if options.root_only:
@@ -184,7 +191,12 @@ class CelesteModCLI:
             mods = mod_manager.get_root_mods()
         else:
             mods = mod_manager.get_installed_mods()
-        mod_manager.pretty_print_mods(mods)
+        if options.enabled_only:
+            blacklisted_filenames = mod_manager.get_blacklisted_mod_filenames()
+            mods = [
+                mod for mod in mods if mod.get_filename() not in blacklisted_filenames
+            ]
+        mod_manager.pretty_print_mods(mods, show_enabled=not options.enabled_only)
 
     def list_tree(
         self, args: list[str], prog_name: str = "celeste-mod-manager list-tree"
@@ -208,12 +220,21 @@ class CelesteModCLI:
             default=False,
             help="Also include optional dependencies in the tree.",
         )
+        parser.add_option(
+            "--enabled",
+            action="store_true",
+            dest="enabled_only",
+            default=False,
+            help="Only include enabled mods in the tree.",
+        )
         options, _ = parser.parse_args(args)
         if options.max_depth <= 0:
             print("ERROR: max depth must be a positive integer.", file=sys.stderr)
             return 1
         mod_manager.analyse_mod_deps(
-            maxdepth=options.max_depth, optional=options.optional_deps
+            maxdepth=options.max_depth,
+            optional=options.optional_deps,
+            enabled_only=options.enabled_only,
         )
         return 0
 
@@ -373,6 +394,110 @@ class CelesteModCLI:
 
         print("ERROR: failed to uninstall mods.", file=sys.stderr)
         return 1
+
+    def _toggle_mods(
+        self,
+        args: Sequence[str],
+        action: str,
+        prog_name: str,
+    ) -> int:
+        parser = optparse.OptionParser(prog=prog_name)
+        _, positionals = parser.parse_args(list(args))
+
+        if len(positionals) == 0:
+            print(f"ERROR: no mod specified to {action}.", file=sys.stderr)
+            return 1
+
+        planned_mods_by_name: dict[str, mod_manager.Mod] = {}
+        skipped_mods = 0
+        valid_mod_names = []
+        build_plan = (
+            mod_manager.build_disable_plan
+            if action == "disable"
+            else mod_manager.build_enable_plan
+        )
+        gerund_action = "disabling" if action == "disable" else "enabling"
+
+        for mod_name in positionals:
+            mods_to_toggle, status = build_plan(mod_name)
+            if status == mod_manager.ModToggleStatus.NOT_INSTALLED:
+                print(f"ERROR: mod '{mod_name}' is not installed.", file=sys.stderr)
+                skipped_mods += 1
+                continue
+            if status == mod_manager.ModToggleStatus.NOT_RECORDED_ROOT:
+                print(
+                    f"ERROR: mod '{mod_name}' is not a recorded root mod. "
+                    f"{gerund_action.capitalize()} it may cause other mods to fail loading.",
+                    file=sys.stderr,
+                )
+                skipped_mods += 1
+                continue
+            if status == mod_manager.ModToggleStatus.ROOT_TRACK_DISABLED:
+                print(
+                    f"ERROR: {action} is not implemented when root install tracking is disabled.",
+                    file=sys.stderr,
+                )
+                return 1
+            if status == mod_manager.ModToggleStatus.ALREADY_DISABLED:
+                print(f"Mod '{mod_name}' is already disabled.")
+                continue
+            if status == mod_manager.ModToggleStatus.ALREADY_ENABLED:
+                print(f"Mod '{mod_name}' and its dependencies are already enabled.")
+                continue
+            if status == mod_manager.ModToggleStatus.UNEXPECTED:
+                print(
+                    f"ERROR: failed to build {action} plan for mod '{mod_name}'.",
+                    file=sys.stderr,
+                )
+                skipped_mods += 1
+                continue
+
+            valid_mod_names.append(mod_name)
+            for mod in mods_to_toggle:
+                planned_mods_by_name[mod.name] = mod
+
+        if not planned_mods_by_name:
+            print(f"No mods to {action}.")
+            return 1 if skipped_mods else 0
+
+        mods_to_toggle = sorted(
+            planned_mods_by_name.values(), key=lambda mod: mod.name.lower()
+        )
+        requested_mods = ", ".join(valid_mod_names)
+        blacklist_action = "added to" if action == "disable" else "removed from"
+        print(
+            f"The following mod(s) will be {blacklist_action} blacklist.txt for: {requested_mods}"
+        )
+        for mod in mods_to_toggle:
+            print(f"  - {mod.name} (v{mod.version}) [{mod.get_filename()}]")
+
+        answer = input("Proceed? [y/N] ").strip().lower()
+        if answer not in ("y", "yes"):
+            print(f"Skipped {gerund_action} mods.")
+            return 0
+
+        toggle_mods = (
+            mod_manager.disable_mods if action == "disable" else mod_manager.enable_mods
+        )
+        if toggle_mods(mods_to_toggle):
+            past_action = "disabled" if action == "disable" else "enabled"
+            print(f"Successfully {past_action} mods.")
+            return 1 if skipped_mods else 0
+
+        print(f"ERROR: failed to {action} mods.", file=sys.stderr)
+        return 1
+
+    def disable(
+        self, args: Sequence[str], prog_name: str = "celeste-mod-manager disable"
+    ) -> int:
+        """Disable mod(s) by adding them and exclusive dependencies to blacklist.txt."""
+        return self._toggle_mods(args, action="disable", prog_name=prog_name)
+
+    def enable(
+        self, args: Sequence[str], prog_name: str = "celeste-mod-manager enable"
+    ) -> int:
+        """Enable mod(s) by removing them and disabled dependencies from blacklist.txt."""
+        return self._toggle_mods(args, action="enable", prog_name=prog_name)
 
     def upgrade(
         self, args: list[str], prog_name: str = "celeste-mod-manager upgrade"

@@ -132,11 +132,7 @@ def get_mods_exclusively_depending_on_closure(mod: Mod) -> list[Mod]:
     result = [installed_dict[mod.name]]
     result.extend(
         sorted(
-            (
-                installed_dict[name]
-                for name in closure_names
-                if name != mod.name
-            ),
+            (installed_dict[name] for name in closure_names if name != mod.name),
             key=lambda installed_mod: installed_mod.name.lower(),
         )
     )
@@ -216,28 +212,54 @@ def resolve_deps(
     return resolved_deps, failed_deps
 
 
-def pretty_print_mods(mods: list[Mod]):
+def pretty_print_mods(mods: list[Mod], show_enabled: bool = True):
     if not mods or len(mods) == 0:
         print("No mods installed.")
         return
 
     mods.sort(key=lambda m: m.name.lower())
+    blacklisted_filenames = get_blacklisted_mod_filenames()
+    statuses_by_name = {
+        mod.name: "ON" if _is_mod_enabled(mod, blacklisted_filenames) else ""
+        for mod in mods
+    }
 
     max_name_len = max([len("Package")] + [len(mod.name) for mod in mods])
     max_version_len = max([len("Version")] + [len(mod.version) for mod in mods])
+    max_status_len = max(
+        [len("Enabled")] + [len(status) for status in statuses_by_name.values()]
+    )
 
-    print(f"{'Mod':<{max_name_len}} {'Version':<{max_version_len}}")
-    print(f"{'-' * max_name_len} {'-' * max_version_len}")
+    if show_enabled:
+        print(
+            f"{'Mod':<{max_name_len}} "
+            f"{'Version':<{max_version_len}} "
+            f"{'Enabled':<{max_status_len}}"
+        )
+        print(f"{'-' * max_name_len} {'-' * max_version_len} {'-' * max_status_len}")
+    else:
+        print(f"{'Mod':<{max_name_len}} {'Version':<{max_version_len}}")
+        print(f"{'-' * max_name_len} {'-' * max_version_len}")
+
     for mod in mods:
-        print(f"{mod.name:<{max_name_len}} {mod.version:<{max_version_len}}")
+        status = statuses_by_name[mod.name]
+        if show_enabled:
+            print(
+                f"{mod.name:<{max_name_len}} "
+                f"{mod.version:<{max_version_len}} "
+                f"{status:^{max_status_len}}"
+            )
+        else:
+            print(f"{mod.name:<{max_name_len}} {mod.version:<{max_version_len}}")
 
 
-def analyse_mod_deps(maxdepth: int, optional: bool = False):
+def analyse_mod_deps(maxdepth: int, optional: bool = False, enabled_only: bool = False):
     mods = get_installed_mods()
     if not mods:
         print("No mods installed.")
         return
 
+    blacklisted_filenames = get_blacklisted_mod_filenames()
     installed_dict = {mod.name: mod for mod in mods}
     graph = {}
     in_degree = {mod.name: 0 for mod in mods}
@@ -256,7 +278,9 @@ def analyse_mod_deps(maxdepth: int, optional: bool = False):
 
         for dep in optional_deps:
             dep_name = dep.get("Name")
-            if dep_name in installed_dict:
+            if dep_name in installed_dict and (
+                not enabled_only or _is_mod_enabled(mod, blacklisted_filenames)
+            ):
                 optional_dependents[dep_name].add(mod.name)
 
         for dep in deps:
@@ -268,7 +292,9 @@ def analyse_mod_deps(maxdepth: int, optional: bool = False):
 
             if dep_name in installed_dict:
                 graph[mod.name].append((dep_name, is_opt))
-                if not is_opt or optional:
+                if (not is_opt or optional) and (
+                    not enabled_only or _is_mod_enabled(mod, blacklisted_filenames)
+                ):
                     in_degree[dep_name] = in_degree.get(dep_name, 0) + 1
             else:
                 graph[mod.name].append((f"{dep_name} (Missing)", is_opt))
@@ -302,6 +328,15 @@ def analyse_mod_deps(maxdepth: int, optional: bool = False):
 
     # Find the sources in the DAG
     roots = [node for node in graph if in_degree.get(node) == 0]
+    if enabled_only:
+        roots = [
+            root
+            for root in roots
+            if _is_mod_enabled(installed_dict[root], blacklisted_filenames)
+        ]
+        if not roots:
+            print("No mods installed.")
+            return
     roots.sort(key=lambda x: x.lower())
 
     recorded_root_names = set()
@@ -322,15 +357,13 @@ def analyse_mod_deps(maxdepth: int, optional: bool = False):
     ):
         if is_root:
             display_node = f"{node} ({installed_dict[node].version})"
+            if not _is_mod_enabled(installed_dict[node], blacklisted_filenames):
+                display_node = f"{display_node} \033[91m[DISABLED]\033[0m"
             if node in orphan_roots:
                 display_node = f"{display_node} \033[1;33m[ORPHAN]\033[0m"
             if node in optional_dependents and optional_dependents[node]:
-                dependents = ", ".join(
-                    sorted(optional_dependents[node], key=str.lower)
-                )
-                display_node = (
-                    f"{display_node} (optionally depended by {dependents})"
-                )
+                dependents = ", ".join(sorted(optional_dependents[node], key=str.lower))
+                display_node = f"{display_node} (optionally depended by {dependents})"
             print(display_node)
             new_prefix = prefix
         else:
@@ -343,6 +376,10 @@ def analyse_mod_deps(maxdepth: int, optional: bool = False):
                     if node in installed_dict
                     else node
                 )
+                if node in installed_dict and not _is_mod_enabled(
+                    installed_dict[node], blacklisted_filenames
+                ):
+                    display_node = f"{display_node} \033[91m[DISABLED]\033[0m"
             if is_opt:
                 display_node = f"{display_node} (Optional)"
             print(f"{prefix}{connector}{display_node}")
@@ -546,6 +583,237 @@ class UninstallModStatus(Enum):
     UNEXPECTED = "unexpected"
 
 
+_BLACKLIST_HEADER = (
+    "# This is the blacklist. Lines starting with # are ignored.",
+    "# Mod folders and archives listed in this file will be disabled.",
+    "# ExampleFolder",
+    "# SomeMod.zip",
+    "",
+    "# The following blacklist is generated by celeste-mod-manager.",
+)
+
+
+def _get_blacklist_path() -> str:
+    return os.path.join(config.MODS_DIR, "blacklist.txt")
+
+
+def _read_blacklist_lines() -> list[str]:
+    blacklist_path = _get_blacklist_path()
+    if not os.path.exists(blacklist_path):
+        return []
+
+    with open(blacklist_path, "r", encoding="utf-8") as f:
+        return [line.rstrip("\n") for line in f]
+
+
+def get_blacklisted_mod_filenames() -> set[str]:
+    filenames = set()
+    for line in _read_blacklist_lines():
+        entry = line.strip()
+        if not entry or entry.startswith("#"):
+            continue
+        filenames.add(entry)
+    return filenames
+
+
+def _write_blacklist_filenames(
+    filenames_to_add: set[str] | None = None,
+    filenames_to_remove: set[str] | None = None,
+) -> None:
+    filenames_to_add = filenames_to_add or set()
+    filenames_to_remove = filenames_to_remove or set()
+
+    os.makedirs(config.MODS_DIR, exist_ok=True)
+
+    entries = set()
+    for line in _read_blacklist_lines():
+        entry = line.strip()
+        if entry and not entry.startswith("#"):
+            if entry in filenames_to_remove:
+                continue
+            entries.add(entry)
+
+    entries.update(filenames_to_add)
+    new_lines = list(_BLACKLIST_HEADER)
+    new_lines.extend(sorted(entries, key=str.lower))
+
+    blacklist_path = _get_blacklist_path()
+    with open(blacklist_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(new_lines).rstrip() + "\n")
+
+
+def _is_mod_enabled(mod: Mod, blacklisted_filenames: set[str]) -> bool:
+    return mod.get_filename() not in blacklisted_filenames
+
+
+def _get_mod_dependency_closure_from_available_mods(
+    mod: Mod,
+    available_mods: list[Mod],
+    optional: bool = False,
+    _visited: set[str] | None = None,
+) -> list[Mod]:
+    if _visited is None:
+        _visited = set()
+
+    if mod.name in _visited:
+        return []
+    _visited.add(mod.name)
+
+    available_dict = {
+        available_mod.name: available_mod for available_mod in available_mods
+    }
+    closure = [mod]
+
+    for dep in mod.get_mod_deps(optional=optional):
+        dep_name = dep.get("Name")
+        if (
+            not dep_name
+            or dep_name in ["Everest", "Celeste", "EverestCore"]
+            or dep_name not in available_dict
+        ):
+            continue
+
+        closure.extend(
+            _get_mod_dependency_closure_from_available_mods(
+                available_dict[dep_name],
+                available_mods,
+                optional=optional,
+                _visited=_visited,
+            )
+        )
+
+    return closure
+
+
+class ModToggleStatus(Enum):
+    READY = "ready"
+    ROOT_TRACK_DISABLED = "root_track_disabled"
+    NOT_INSTALLED = "not_installed"
+    NOT_RECORDED_ROOT = "not_recorded_root"
+    ALREADY_ENABLED = "already_enabled"
+    ALREADY_DISABLED = "already_disabled"
+    UNEXPECTED = "unexpected"
+
+
+def build_disable_plan(mod_name: str) -> tuple[list[Mod], ModToggleStatus]:
+    if not config._ENABLE_ROOT_INSTALL_TRACK:
+        return [], ModToggleStatus.ROOT_TRACK_DISABLED
+
+    try:
+        installed_mods = get_installed_mods()
+        installed_dict = {mod.name: mod for mod in installed_mods}
+        if mod_name not in installed_dict:
+            return [], ModToggleStatus.NOT_INSTALLED
+
+        root_names = {mod.name for mod in get_root_mods()}
+        if mod_name not in root_names:
+            return [], ModToggleStatus.NOT_RECORDED_ROOT
+
+        blacklisted_filenames = get_blacklisted_mod_filenames()
+        target_mod = installed_dict[mod_name]
+        if not _is_mod_enabled(target_mod, blacklisted_filenames):
+            return [], ModToggleStatus.ALREADY_DISABLED
+
+        enabled_mods = [
+            mod for mod in installed_mods if _is_mod_enabled(mod, blacklisted_filenames)
+        ]
+        enabled_dict = {mod.name: mod for mod in enabled_mods}
+        reverse_graph: dict[str, set[str]] = {mod.name: set() for mod in enabled_mods}
+        for enabled_mod in enabled_mods:
+            for dep in enabled_mod.get_mod_deps(optional=True):
+                dep_name = dep.get("Name")
+                if (
+                    not dep_name
+                    or dep_name in ["Everest", "Celeste", "EverestCore"]
+                    or dep_name not in enabled_dict
+                ):
+                    continue
+                reverse_graph[dep_name].add(enabled_mod.name)
+
+        closure_names = {
+            closure_mod.name
+            for closure_mod in _get_mod_dependency_closure_from_available_mods(
+                target_mod, enabled_mods, optional=True
+            )
+        }
+        changed = True
+        while changed:
+            changed = False
+            for name in list(closure_names):
+                if name == target_mod.name:
+                    continue
+                if name in root_names or not reverse_graph.get(name, set()).issubset(
+                    closure_names
+                ):
+                    closure_names.remove(name)
+                    changed = True
+
+        result = [target_mod]
+        result.extend(
+            sorted(
+                (
+                    enabled_dict[name]
+                    for name in closure_names
+                    if name != target_mod.name
+                ),
+                key=lambda mod: mod.name.lower(),
+            )
+        )
+        return result, ModToggleStatus.READY
+    except Exception as e:
+        logger.error(f"Failed to build disable plan for mod '{mod_name}': {e}")
+        return [], ModToggleStatus.UNEXPECTED
+
+
+def build_enable_plan(mod_name: str) -> tuple[list[Mod], ModToggleStatus]:
+    if not config._ENABLE_ROOT_INSTALL_TRACK:
+        return [], ModToggleStatus.ROOT_TRACK_DISABLED
+
+    try:
+        installed_mods = get_installed_mods()
+        installed_dict = {mod.name: mod for mod in installed_mods}
+        if mod_name not in installed_dict:
+            return [], ModToggleStatus.NOT_INSTALLED
+
+        root_names = {mod.name for mod in get_root_mods()}
+        if mod_name not in root_names:
+            return [], ModToggleStatus.NOT_RECORDED_ROOT
+
+        target_mod = installed_dict[mod_name]
+        blacklisted_filenames = get_blacklisted_mod_filenames()
+        closure = get_mod_dependency_closure(target_mod, optional=True)
+        mods_to_enable = [
+            mod for mod in closure if not _is_mod_enabled(mod, blacklisted_filenames)
+        ]
+        if not mods_to_enable:
+            return [], ModToggleStatus.ALREADY_ENABLED
+
+        return mods_to_enable, ModToggleStatus.READY
+    except Exception as e:
+        logger.error(f"Failed to build enable plan for mod '{mod_name}': {e}")
+        return [], ModToggleStatus.UNEXPECTED
+
+
+def disable_mods(mods: list[Mod]) -> bool:
+    try:
+        _write_blacklist_filenames({mod.get_filename() for mod in mods})
+        return True
+    except Exception as e:
+        logger.error(f"Failed to disable mods: {e}")
+        return False
+
+
+def enable_mods(mods: list[Mod]) -> bool:
+    try:
+        _write_blacklist_filenames(
+            filenames_to_remove={mod.get_filename() for mod in mods}
+        )
+        return True
+    except Exception as e:
+        logger.error(f"Failed to enable mods: {e}")
+        return False
+
+
 def build_uninstall_plan(
     mod_name: str, force: bool = False
 ) -> tuple[list[Mod], UninstallModStatus]:
@@ -581,7 +849,9 @@ def uninstall_mods(mods: list[Mod]) -> bool:
                 os.remove(mod.filepath)
             else:
                 logger.warning(f"Mod file '{mod.filepath}' does not exist.")
-        _remove_root_installed_mods({mod.name for mod in mods if mod.name in root_names})
+        _remove_root_installed_mods(
+            {mod.name for mod in mods if mod.name in root_names}
+        )
         return True
     except Exception as e:
         logger.error(f"Failed to uninstall mods: {e}")

@@ -96,6 +96,48 @@ def test_list_tree_includes_optional_dependencies_when_requested(
     assert "OptionalSkin (1.0.0) (optionally depended by AdventurePack)" not in output
 
 
+def test_list_tree_marks_disabled_mods(
+    mods_dir: Path, mod_zip_factory, installed_mods_writer, capsys
+):
+    build_complex_mod_library(mods_dir, mod_zip_factory, installed_mods_writer)
+    (mods_dir / "blacklist.txt").write_text(
+        "AdventurePack.zip\nCoreLib.zip\n", encoding="utf-8"
+    )
+
+    mod_manager.analyse_mod_deps(maxdepth=2)
+
+    output = capsys.readouterr().out
+    assert_contains_all(
+        output,
+        [
+            "AdventurePack (1.0.0) \x1b[91m[DISABLED]\x1b[0m\n",
+            "├── CoreLib (1.0.0) \x1b[91m[DISABLED]\x1b[0m\n",
+        ],
+    )
+    assert "MapPack (1.0.0) \x1b[91m[DISABLED]\x1b[0m" not in output
+
+
+def test_list_tree_enabled_only_filters_disabled_roots_but_keeps_dependencies(
+    mods_dir: Path, mod_zip_factory, installed_mods_writer, capsys
+):
+    build_complex_mod_library(mods_dir, mod_zip_factory, installed_mods_writer)
+    (mods_dir / "blacklist.txt").write_text(
+        "AdventurePack.zip\nCoreLib.zip\n", encoding="utf-8"
+    )
+
+    mod_manager.analyse_mod_deps(maxdepth=2, enabled_only=True)
+
+    output = capsys.readouterr().out
+    assert_contains_all(
+        output,
+        [
+            "MapPack (1.0.0)",
+            "├── CoreLib (1.0.0) \x1b[91m[DISABLED]\x1b[0m\n",
+        ],
+    )
+    assert "AdventurePack" not in output
+
+
 def test_list_tree_prints_no_mods_when_empty(mods_dir: Path, capsys):
     mod_manager.analyse_mod_deps(maxdepth=2)
 

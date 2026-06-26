@@ -3,19 +3,17 @@ from pathlib import Path
 from src.cli import CelesteModCLI
 
 
-def test_list_mods_prints_all_installed_mods(
-    mods_dir: Path, mod_zip_factory, capsys
-):
+def test_list_mods_prints_all_installed_mods(mods_dir: Path, mod_zip_factory, capsys):
     mod_zip_factory(mods_dir, "beta-custom-name.zip", "BetaMod", "2.0.0")
     mod_zip_factory(mods_dir, "alpha-custom-name.zip", "AlphaMod", "1.0.0")
 
     CelesteModCLI().list_mods([])
 
     assert capsys.readouterr().out == (
-        "Mod      Version\n"
-        "-------- -------\n"
-        "AlphaMod 1.0.0  \n"
-        "BetaMod  2.0.0  \n"
+        "Mod      Version Enabled\n"
+        "-------- ------- -------\n"
+        "AlphaMod 1.0.0     ON   \n"
+        "BetaMod  2.0.0     ON   \n"
     )
 
 
@@ -38,9 +36,38 @@ def test_list_mods_root_only_prints_recorded_root_mods(
     CelesteModCLI().list_mods(["--root"])
 
     assert capsys.readouterr().out == (
-        "Mod     Version\n"
-        "------- -------\n"
-        "RootMod 1.0.0  \n"
+        "Mod     Version Enabled\n"
+        "------- ------- -------\n"
+        "RootMod 1.0.0     ON   \n"
+    )
+
+
+def test_list_mods_marks_disabled_mods(mods_dir: Path, mod_zip_factory, capsys):
+    mod_zip_factory(mods_dir, "EnabledMod.zip", "EnabledMod", "1.0.0")
+    mod_zip_factory(mods_dir, "DisabledMod.zip", "DisabledMod", "1.0.0")
+    (mods_dir / "blacklist.txt").write_text("DisabledMod.zip\n", encoding="utf-8")
+
+    CelesteModCLI().list_mods([])
+
+    assert capsys.readouterr().out == (
+        "Mod         Version Enabled\n"
+        "----------- ------- -------\n"
+        "DisabledMod 1.0.0          \n"
+        "EnabledMod  1.0.0     ON   \n"
+    )
+
+
+def test_list_mods_enabled_only_filters_disabled_mods(
+    mods_dir: Path, mod_zip_factory, capsys
+):
+    mod_zip_factory(mods_dir, "EnabledMod.zip", "EnabledMod", "1.0.0")
+    mod_zip_factory(mods_dir, "DisabledMod.zip", "DisabledMod", "1.0.0")
+    (mods_dir / "blacklist.txt").write_text("DisabledMod.zip\n", encoding="utf-8")
+
+    CelesteModCLI().list_mods(["--enabled"])
+
+    assert capsys.readouterr().out == (
+        "Mod        Version\n" "---------- -------\n" "EnabledMod 1.0.0  \n"
     )
 
 
