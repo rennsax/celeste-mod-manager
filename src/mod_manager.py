@@ -899,6 +899,7 @@ def build_uninstall_plan(
 def uninstall_mods(mods: list[Mod]) -> bool:
     try:
         root_names = {mod.name for mod in get_root_mods()}
+        filenames_to_remove = {mod.get_filename() for mod in mods}
         for mod in mods:
             if os.path.exists(mod.filepath):
                 os.remove(mod.filepath)
@@ -907,6 +908,7 @@ def uninstall_mods(mods: list[Mod]) -> bool:
         _remove_root_installed_mods(
             {mod.name for mod in mods if mod.name in root_names}
         )
+        _write_blacklist_filenames(filenames_to_remove=filenames_to_remove)
         return True
     except Exception as e:
         logger.error(f"Failed to uninstall mods: {e}")

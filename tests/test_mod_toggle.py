@@ -164,6 +164,30 @@ def test_enable_and_disable_update_blacklist_with_standard_header(
     )
 
 
+def test_uninstall_removes_mods_from_blacklist(
+    mods_dir: Path, mod_zip_factory, installed_mods_writer
+):
+    mod_zip_factory(mods_dir, "Root.zip", "Root", deps=[_dep("Dependency")])
+    mod_zip_factory(mods_dir, "Dependency.zip", "Dependency")
+    installed_mods_writer(mods_dir, [_root("Root")])
+    _write_blacklist(
+        mods_dir,
+        [
+            "Root.zip",
+            "Dependency.zip",
+            "OtherDisabled.zip",
+        ],
+    )
+    mods_to_uninstall, status = mod_manager.build_uninstall_plan("Root")
+    assert status == mod_manager.UninstallModStatus.READY
+
+    assert mod_manager.uninstall_mods(mods_to_uninstall)
+
+    assert (mods_dir / "blacklist.txt").read_text(encoding="utf-8") == (
+        _EXPECTED_BLACKLIST_HEADER + "OtherDisabled.zip\n"
+    )
+
+
 def test_build_plans_report_missing_and_unchanged_states(
     mods_dir: Path, mod_zip_factory, installed_mods_writer
 ):
