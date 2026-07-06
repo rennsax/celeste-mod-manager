@@ -427,7 +427,15 @@ class CelesteModCLI:
         prog_name: str,
     ) -> int:
         parser = optparse.OptionParser(prog=prog_name)
-        _, positionals = parser.parse_args(list(args))
+        if action == "enable":
+            parser.add_option(
+                "--optional",
+                action="store_true",
+                dest="optional",
+                default=False,
+                help="Also enable optional dependencies.",
+            )
+        options, positionals = parser.parse_args(list(args))
 
         if len(positionals) == 0:
             print(f"ERROR: no mod specified to {action}.", file=sys.stderr)
@@ -444,7 +452,10 @@ class CelesteModCLI:
         gerund_action = "disabling" if action == "disable" else "enabling"
 
         for mod_name in positionals:
-            mods_to_toggle, status = build_plan(mod_name)
+            if action == "enable":
+                mods_to_toggle, status = build_plan(mod_name, optional=options.optional)
+            else:
+                mods_to_toggle, status = build_plan(mod_name)
             if status == mod_manager.ModToggleStatus.NOT_INSTALLED:
                 print(f"ERROR: mod '{mod_name}' is not installed.", file=sys.stderr)
                 skipped_mods += 1

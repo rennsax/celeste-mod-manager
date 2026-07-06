@@ -136,6 +136,52 @@ def test_enable_plan_includes_disabled_dependencies(
     assert _plan_names(mods) == ["Root", "Dependency"]
 
 
+def test_enable_plan_skips_optional_dependencies_by_default(
+    mods_dir: Path, mod_zip_factory, installed_mods_writer
+):
+    mod_zip_factory(
+        mods_dir,
+        "Root.zip",
+        "Root",
+        deps=[_dep("RequiredDependency")],
+        optional_deps=[_dep("OptionalDependency")],
+    )
+    mod_zip_factory(mods_dir, "RequiredDependency.zip", "RequiredDependency")
+    mod_zip_factory(mods_dir, "OptionalDependency.zip", "OptionalDependency")
+    installed_mods_writer(mods_dir, [_root("Root")])
+    _write_blacklist(
+        mods_dir, ["Root.zip", "RequiredDependency.zip", "OptionalDependency.zip"]
+    )
+
+    mods, status = mod_manager.build_enable_plan("Root")
+
+    assert status == mod_manager.ModToggleStatus.READY
+    assert _plan_names(mods) == ["Root", "RequiredDependency"]
+
+
+def test_enable_plan_includes_optional_dependencies_when_requested(
+    mods_dir: Path, mod_zip_factory, installed_mods_writer
+):
+    mod_zip_factory(
+        mods_dir,
+        "Root.zip",
+        "Root",
+        deps=[_dep("RequiredDependency")],
+        optional_deps=[_dep("OptionalDependency")],
+    )
+    mod_zip_factory(mods_dir, "RequiredDependency.zip", "RequiredDependency")
+    mod_zip_factory(mods_dir, "OptionalDependency.zip", "OptionalDependency")
+    installed_mods_writer(mods_dir, [_root("Root")])
+    _write_blacklist(
+        mods_dir, ["Root.zip", "RequiredDependency.zip", "OptionalDependency.zip"]
+    )
+
+    mods, status = mod_manager.build_enable_plan("Root", optional=True)
+
+    assert status == mod_manager.ModToggleStatus.READY
+    assert _plan_names(mods) == ["Root", "RequiredDependency", "OptionalDependency"]
+
+
 def test_enable_and_disable_update_blacklist_with_standard_header(
     mods_dir: Path, mod_zip_factory, installed_mods_writer
 ):

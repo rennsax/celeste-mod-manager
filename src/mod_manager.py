@@ -843,7 +843,9 @@ def build_disable_plan(mod_name: str) -> tuple[list[Mod], ModToggleStatus]:
         return [], ModToggleStatus.UNEXPECTED
 
 
-def build_enable_plan(mod_name: str) -> tuple[list[Mod], ModToggleStatus]:
+def build_enable_plan(
+    mod_name: str, optional: bool = False
+) -> tuple[list[Mod], ModToggleStatus]:
     if not config._ENABLE_ROOT_INSTALL_TRACK:
         return [], ModToggleStatus.ROOT_TRACK_DISABLED
 
@@ -860,7 +862,7 @@ def build_enable_plan(mod_name: str) -> tuple[list[Mod], ModToggleStatus]:
         target_mod = installed_dict[mod_name]
         blacklisted_filenames = get_blacklisted_mod_filenames()
         closure = _get_mod_dependency_closure_from_installed_dict(
-            target_mod, installed_dict, optional=True
+            target_mod, installed_dict, optional=optional
         )
         mods_to_enable = [
             mod for mod in closure if not _is_mod_enabled(mod, blacklisted_filenames)
