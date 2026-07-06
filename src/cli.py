@@ -53,6 +53,28 @@ class CelesteModCLI:
                 f"ERROR: Failed to install the dependencies for {mod_name}: {failed_deps_str}."
             )
             return False
+
+        disabled_required_mods = mod_manager.get_disabled_required_mods(
+            mod, optional=optional_deps
+        )
+        if disabled_required_mods:
+            print(
+                "The following locally installed mod(s) are required to run "
+                f"{mod.name}, but are disabled by the blacklist:"
+            )
+            for required_mod in disabled_required_mods:
+                print(
+                    f"  - {required_mod.name} "
+                    f"(v{required_mod.version}) [{required_mod.get_filename()}]"
+                )
+            answer = input("Enable them now? [y/N] ").strip().lower()
+            if answer not in ("y", "yes"):
+                print("Skipped enabling required mods.")
+                return False
+            if not mod_manager.enable_mods(disabled_required_mods):
+                print("ERROR: failed to enable required mods.", file=sys.stderr)
+                return False
+            print("Successfully enabled required mods.")
         return True
 
     def install(

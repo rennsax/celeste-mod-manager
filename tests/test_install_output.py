@@ -2,6 +2,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from src import mod_manager
+from src.cli import CelesteModCLI
 
 
 def _dep(name: str, version: str = "1.0.0") -> dict[str, str]:
@@ -84,3 +85,90 @@ def test_resolve_deps_prints_dependency_progress(
     assert "  Requirement already satisfied: InstalledDependency (1.0.0)\n" in output
     assert "  Resolving dependency DownloadedDependency (1.0.0)\n" in output
     assert "  Downloading dependency DownloadedDependency\n" in output
+
+
+def test_get_disabled_required_mods_finds_disabled_installed_dependency(
+    mods_dir: Path, mod_zip_factory, capsys
+):
+    mod_zip_factory(
+        mods_dir,
+        "Root.zip",
+        "Root",
+        deps=[_dep("DisabledDependency")],
+    )
+    mod_zip_factory(
+        mods_dir,
+        "DisabledDependency.zip",
+        "DisabledDependency",
+    )
+    (mods_dir / "blacklist.txt").write_text(
+        "DisabledDependency.zip\nOtherDisabled.zip\n", encoding="utf-8"
+    )
+
+    root = next(mod for mod in mod_manager.get_installed_mods() if mod.name == "Root")
+    resolved_deps, failed_deps = mod_manager.resolve_deps(root)
+    disabled_required_mods = mod_manager.get_disabled_required_mods(root)
+
+    output = capsys.readouterr().out
+    assert resolved_deps == []
+    assert failed_deps == []
+    assert "  Re-enabling dependency DisabledDependency\n" not in output
+    assert [mod.name for mod in disabled_required_mods] == ["DisabledDependency"]
+    assert "DisabledDependency.zip" in (mods_dir / "blacklist.txt").read_text(
+        encoding="utf-8"
+    )
+    assert "OtherDisabled.zip" in (mods_dir / "blacklist.txt").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_install_prompts_before_enabling_disabled_required_mods(
+    mods_dir: Path, mod_zip_factory, installed_mods_writer, monkeypatch, capsys
+):
+    mod_zip_factory(
+        mods_dir,
+        "Root.zip",
+        "Root",
+        deps=[_dep("DisabledDependency")],
+    )
+    mod_zip_factory(
+        mods_dir,
+        "DisabledDependency.zip",
+        "DisabledDependency",
+    )
+    installed_mods_writer(
+        mods_dir, [{"name": "Root", "version": "1.0.0", "filename": "Root.zip"}]
+    )
+    (mods_dir / "blacklist.txt").write_text(
+        "Root.zip\nDisabledDependency.zip\n", encoding="utf-8"
+    )
+    monkeypatch.setattr("builtins.input", lambda prompt: "yes")
+
+    assert CelesteModCLI()._install_mod("Root")
+
+    output = capsys.readouterr().out
+    assert "The following locally installed mod(s) are required to run Root" in output
+    assert "  - DisabledDependency (v1.0.0) [DisabledDependency.zip]\n" in output
+    assert "  - Root (v1.0.0) [Root.zip]\n" in output
+    assert "Successfully enabled required mods.\n" in output
+    blacklist = (mods_dir / "blacklist.txt").read_text(encoding="utf-8")
+    assert "Root.zip" not in blacklist
+    assert "DisabledDependency.zip" not in blacklist
+
+
+def test_install_aborts_when_user_declines_enabling_disabled_required_mods(
+    mods_dir: Path, mod_zip_factory, installed_mods_writer, monkeypatch, capsys
+):
+    mod_zip_factory(mods_dir, "Root.zip", "Root")
+    installed_mods_writer(
+        mods_dir, [{"name": "Root", "version": "1.0.0", "filename": "Root.zip"}]
+    )
+    (mods_dir / "blacklist.txt").write_text("Root.zip\n", encoding="utf-8")
+    monkeypatch.setattr("builtins.input", lambda prompt: "")
+
+    assert not CelesteModCLI()._install_mod("Root")
+
+    output = capsys.readouterr().out
+    assert "The following locally installed mod(s) are required to run Root" in output
+    assert "Skipped enabling required mods.\n" in output
+    assert "Root.zip" in (mods_dir / "blacklist.txt").read_text(encoding="utf-8")

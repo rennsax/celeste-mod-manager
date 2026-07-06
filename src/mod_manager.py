@@ -296,6 +296,25 @@ def resolve_deps(
     return resolved_deps, failed_deps
 
 
+def get_disabled_required_mods(mod: Mod, optional: bool = False) -> list[Mod]:
+    installed_mods = get_installed_mods()
+    installed_dict = {
+        installed_mod.name: installed_mod for installed_mod in installed_mods
+    }
+    blacklisted_filenames = get_blacklisted_mod_filenames()
+    closure = _get_mod_dependency_closure_from_installed_dict(
+        mod, installed_dict, optional=optional
+    )
+    return sorted(
+        (
+            closure_mod
+            for closure_mod in closure
+            if not _is_mod_enabled(closure_mod, blacklisted_filenames)
+        ),
+        key=lambda closure_mod: closure_mod.name.lower(),
+    )
+
+
 def pretty_print_mods(mods: list[Mod], show_enabled: bool = True):
     if not mods or len(mods) == 0:
         print("No mods installed.")
