@@ -210,7 +210,9 @@ def get_mods_exclusively_depending_on_closure(mod: Mod) -> list[Mod]:
 
 
 def resolve_deps(
-    mod: Mod, optional: bool = False, _visited: set | None = None
+    mod: Mod,
+    optional: bool = False,
+    _visited: set | None = None,
 ) -> tuple[list[Mod], list[str]]:
     if _visited is None:
         _visited = set()
@@ -257,7 +259,9 @@ def resolve_deps(
                     f"Version mismatch for '{dep_name}': required {dep_version}, found {dep_mod.version}"
                 )
             sub_resolved, sub_failed = resolve_deps(
-                dep_mod, optional=optional, _visited=_visited
+                dep_mod,
+                optional=optional,
+                _visited=_visited,
             )
             resolved_deps.extend(sub_resolved)
             failed_deps.extend(sub_failed)
@@ -279,7 +283,9 @@ def resolve_deps(
                     )
                 resolved_deps.append(dep_mod)
                 sub_resolved, sub_failed = resolve_deps(
-                    dep_mod, optional=optional, _visited=_visited
+                    dep_mod,
+                    optional=optional,
+                    _visited=_visited,
                 )
                 resolved_deps.extend(sub_resolved)
                 failed_deps.extend(sub_failed)
