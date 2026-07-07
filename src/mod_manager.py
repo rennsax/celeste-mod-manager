@@ -2,6 +2,7 @@ import os
 import sys
 import urllib.request
 import time
+from dataclasses import dataclass, field
 from enum import Enum
 import yaml
 from loguru import logger
@@ -745,6 +746,17 @@ def _write_blacklist_filenames(
         f.write("\n".join(new_lines).rstrip() + "\n")
 
 
+def _replace_blacklist_filenames(filenames: set[str]) -> None:
+    os.makedirs(config.MODS_DIR, exist_ok=True)
+
+    new_lines = list(_BLACKLIST_HEADER)
+    new_lines.extend(sorted(filenames, key=str.lower))
+
+    blacklist_path = _get_blacklist_path()
+    with open(blacklist_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(new_lines).rstrip() + "\n")
+
+
 def _is_mod_enabled(mod: Mod, blacklisted_filenames: set[str]) -> bool:
     return mod.get_filename() not in blacklisted_filenames
 
@@ -896,6 +908,181 @@ def enable_mods(mods: list[Mod]) -> bool:
         return False
 
 
+class ApplyPlanStatus(Enum):
+    READY = "ready"
+    EMPTY_REQUIREMENTS = "empty_requirements"
+    DUPLICATE_LOCAL_MOD = "duplicate_local_mod"
+    NOT_FOUND_IN_DB = "not_found_in_db"
+    DOWNLOAD_FAILED = "download_failed"
+    UNEXPECTED = "unexpected"
+
+
+@dataclass
+class ApplyPlan:
+    requested: list[str]
+    already_available: list[Mod] = field(default_factory=list)
+    downloaded: list[Mod] = field(default_factory=list)
+    enabled_closure: list[Mod] = field(default_factory=list)
+    blacklisted: list[Mod] = field(default_factory=list)
+    would_download: list[str] = field(default_factory=list)
+    missing: list[str] = field(default_factory=list)
+    failed: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    status: ApplyPlanStatus = ApplyPlanStatus.READY
+    dry_run: bool = False
+
+
+def parse_required_mods_file(path: str) -> list[str]:
+    with open(path, "r", encoding="utf-8") as f:
+        return [
+            line.strip()
+            for line in f
+            if line.strip() and not line.strip().startswith("#")
+        ]
+
+
+def _find_duplicate_mod_names(mods: list[Mod]) -> list[str]:
+    counts: dict[str, int] = {}
+    for mod in mods:
+        counts[mod.name] = counts.get(mod.name, 0) + 1
+    return sorted((name for name, count in counts.items() if count > 1), key=str.lower)
+
+
+def _sorted_unique_mods_by_name(mods_by_name: dict[str, Mod]) -> list[Mod]:
+    return sorted(mods_by_name.values(), key=lambda mod: mod.name.lower())
+
+
+def _build_apply_output_sets(
+    requested_names: list[str], optional: bool, plan: ApplyPlan
+) -> None:
+    installed_mods = get_installed_mods()
+    installed_dict = {mod.name: mod for mod in installed_mods}
+
+    enabled_by_name: dict[str, Mod] = {}
+    for requested_name in requested_names:
+        requested_mod = installed_dict.get(requested_name)
+        if not requested_mod:
+            continue
+        for closure_mod in _get_mod_dependency_closure_from_installed_dict(
+            requested_mod, installed_dict, optional=optional
+        ):
+            enabled_by_name[closure_mod.name] = closure_mod
+
+    enabled_filenames = {mod.get_filename() for mod in enabled_by_name.values()}
+    blacklisted_by_name = {
+        mod.name: mod
+        for mod in installed_mods
+        if mod.get_filename() not in enabled_filenames
+    }
+    plan.enabled_closure = _sorted_unique_mods_by_name(enabled_by_name)
+    plan.blacklisted = _sorted_unique_mods_by_name(blacklisted_by_name)
+
+
+def build_apply_plan(
+    required_names: list[str], optional: bool = False, dry_run: bool = False
+) -> ApplyPlan:
+    requested_names = list(dict.fromkeys(required_names))
+    plan = ApplyPlan(requested=requested_names, dry_run=dry_run)
+    if not requested_names:
+        plan.status = ApplyPlanStatus.EMPTY_REQUIREMENTS
+        return plan
+
+    try:
+        installed_mods = get_installed_mods()
+        duplicate_names = _find_duplicate_mod_names(installed_mods)
+        if duplicate_names:
+            plan.failed = duplicate_names
+            plan.status = ApplyPlanStatus.DUPLICATE_LOCAL_MOD
+            return plan
+
+        installed_dict = {mod.name: mod for mod in installed_mods}
+        already_by_name: dict[str, Mod] = {}
+        downloaded_by_name: dict[str, Mod] = {}
+
+        for requested_name in requested_names:
+            existing_mod = installed_dict.get(requested_name)
+            if existing_mod:
+                already_by_name[requested_name] = existing_mod
+                continue
+
+            mod_info = get_mod_info(requested_name)
+            if not mod_info:
+                plan.missing.append(requested_name)
+                plan.status = ApplyPlanStatus.NOT_FOUND_IN_DB
+                continue
+
+            if dry_run:
+                plan.would_download.append(requested_name)
+                continue
+
+            downloaded_mod, ensure_status = ensure_mod(requested_name, root=False)
+            if not downloaded_mod:
+                plan.failed.append(requested_name)
+                if ensure_status == EnsureModStatus.NOT_FOUND_IN_DB:
+                    plan.missing.append(requested_name)
+                    plan.status = ApplyPlanStatus.NOT_FOUND_IN_DB
+                else:
+                    plan.status = ApplyPlanStatus.DOWNLOAD_FAILED
+                continue
+            if ensure_status == EnsureModStatus.INSTALLED:
+                downloaded_by_name[downloaded_mod.name] = downloaded_mod
+            else:
+                already_by_name[downloaded_mod.name] = downloaded_mod
+            installed_dict[downloaded_mod.name] = downloaded_mod
+
+        if plan.status != ApplyPlanStatus.READY:
+            return plan
+
+        root_mods = list(already_by_name.values()) + list(downloaded_by_name.values())
+        for root_mod in root_mods:
+            if dry_run:
+                for dep in root_mod.get_mod_deps(optional=optional):
+                    dep_name = dep.get("Name")
+                    if (
+                        not dep_name
+                        or dep_name in ["Everest", "Celeste", "EverestCore"]
+                        or dep_name in installed_dict
+                    ):
+                        continue
+                    if dep_name not in plan.would_download:
+                        if get_mod_info(dep_name):
+                            plan.would_download.append(dep_name)
+                        else:
+                            plan.missing.append(dep_name)
+                            plan.status = ApplyPlanStatus.NOT_FOUND_IN_DB
+                if plan.status != ApplyPlanStatus.READY:
+                    return plan
+                continue
+
+            resolved_deps, failed_deps = resolve_deps(root_mod, optional=optional)
+            for dep_mod in resolved_deps:
+                downloaded_by_name[dep_mod.name] = dep_mod
+            if failed_deps:
+                plan.failed.extend(failed_deps)
+                plan.status = ApplyPlanStatus.DOWNLOAD_FAILED
+                return plan
+
+        plan.already_available = _sorted_unique_mods_by_name(already_by_name)
+        plan.downloaded = _sorted_unique_mods_by_name(downloaded_by_name)
+        _build_apply_output_sets(requested_names, optional, plan)
+        return plan
+    except Exception as e:
+        logger.error(f"Failed to build apply plan: {e}")
+        plan.status = ApplyPlanStatus.UNEXPECTED
+        return plan
+
+
+def apply_required_mods(plan: ApplyPlan) -> bool:
+    if plan.status != ApplyPlanStatus.READY:
+        return False
+    try:
+        _replace_blacklist_filenames({mod.get_filename() for mod in plan.blacklisted})
+        return True
+    except Exception as e:
+        logger.error(f"Failed to apply required mods: {e}")
+        return False
+
+
 def build_uninstall_plan(
     mod_name: str, force: bool = False
 ) -> tuple[list[Mod], UninstallModStatus]:
@@ -948,11 +1135,12 @@ def ensure_mod(mod_name: str, root: bool = False) -> tuple[Mod | None, EnsureMod
         mods = get_installed_mods()
         for mod in mods:
             if mod.name == mod_name:
-                try:
-                    _record_root_installed_mod(mod)
-                except Exception as e:
-                    logger.error(f"Failed to record root mod '{mod.name}': {e}")
-                    raise e
+                if root:
+                    try:
+                        _record_root_installed_mod(mod)
+                    except Exception as e:
+                        logger.error(f"Failed to record root mod '{mod.name}': {e}")
+                        raise e
                 return mod, EnsureModStatus.ALREADY_EXISTS
 
         mod_info = get_mod_info(mod_name)

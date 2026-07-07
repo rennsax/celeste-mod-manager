@@ -23,6 +23,7 @@ Commands:
     list               List all installed mods.
     list-tree          List all installed mods and their dependencies in a tree format.
     install            Install some mod(s).
+    apply              EXPERIMENTAL: Apply Mods/required_mods.txt declaratively.
     uninstall          Uninstall root mod(s).
     disable            Disable mod(s) by adding them to Mods/blacklist.txt.
     enable             Enable mod(s) by removing them from Mods/blacklist.txt.
@@ -131,6 +132,8 @@ def main():
         return cli.list_tree(extra_args, prog_name=f"celeste-mod-manager list-tree")
     elif subcommand == "install":
         return cli.install(extra_args, prog_name=f"celeste-mod-manager install")
+    elif subcommand == "apply":
+        return cli.apply(extra_args, prog_name=f"celeste-mod-manager apply")
     elif subcommand == "uninstall":
         return cli.uninstall(extra_args, prog_name=f"celeste-mod-manager uninstall")
     elif subcommand == "disable":

@@ -329,6 +329,137 @@ class CelesteModCLI:
             )
             return 1
 
+    def apply(
+        self, args: Sequence[str], prog_name: str = "celeste-mod-manager apply"
+    ) -> int:
+        """Experimentally apply Mods/required_mods.txt as the desired mod state."""
+
+        def show_help() -> None:
+            print(
+                textwrap.dedent(
+                    f"""\
+                Usage:
+                  {prog_name} [options]
+                    Apply Mods/required_mods.txt declaratively.
+
+                  {prog_name} [options] -r FILE
+                    Apply mods declaratively from FILE.
+
+                  {prog_name} --help | -h
+                    Show this help message.
+
+                Options:
+                  -r, --requirement FILE  Requirement file to apply.
+                  --dry-run               Show the planned target state without downloading or writing blacklist.txt.
+
+                Experimental:
+                  The apply command treats Mods as a local cache and rewrites blacklist.txt
+                  from the requested mods plus their required dependencies."""
+                )
+            )
+
+        parser = optparse.OptionParser(
+            prog=prog_name,
+            add_help_option=False,
+            usage="",
+        )
+        parser.add_option("-r", "--requirement", dest="requirement", metavar="FILE")
+        parser.add_option(
+            "--dry-run", action="store_true", dest="dry_run", default=False
+        )
+        parser.add_option("-h", "--help", action="store_true", dest="help")
+
+        options, positionals = parser.parse_args(list(args))
+        if options.help:
+            show_help()
+            return 0
+        print(
+            "\033[1;33mWARNING: `apply' subcommand is experimental and its behavior may change "
+            "in future versions.\033[0m"
+        )
+        if positionals:
+            print(
+                f"ERROR: unexpected argument(s): {' '.join(positionals)}",
+                file=sys.stderr,
+            )
+            return 1
+
+        requirement_path = options.requirement or os.path.join(
+            config.MODS_DIR, "required_mods.txt"
+        )
+        if not os.path.isfile(requirement_path):
+            print(
+                f"ERROR: requirement file '{requirement_path}' not found.",
+                file=sys.stderr,
+            )
+            return 1
+
+        required_mods = mod_manager.parse_required_mods_file(requirement_path)
+        if not required_mods:
+            print(
+                f"ERROR: requirement file '{requirement_path}' does not declare any mods.",
+                file=sys.stderr,
+            )
+            return 1
+
+        print(f"Applying declarative mod state from {requirement_path}")
+        print(f"Requested mods: {len(required_mods)}")
+        if options.dry_run:
+            print("Dry run: no downloads and no blacklist changes will be made.")
+
+        plan = mod_manager.build_apply_plan(required_mods, dry_run=options.dry_run)
+        if plan.status == mod_manager.ApplyPlanStatus.DUPLICATE_LOCAL_MOD:
+            duplicates = ", ".join(plan.failed)
+            print(
+                f"ERROR: multiple local archives found for mod(s): {duplicates}.",
+                file=sys.stderr,
+            )
+            return 1
+        if plan.status == mod_manager.ApplyPlanStatus.NOT_FOUND_IN_DB:
+            missing = ", ".join(plan.missing)
+            print(
+                f"ERROR: mod(s) not found in the database: {missing}.",
+                file=sys.stderr,
+            )
+            return 1
+        if plan.status == mod_manager.ApplyPlanStatus.DOWNLOAD_FAILED:
+            failed = ", ".join(plan.failed)
+            print(f"ERROR: failed to download mod(s): {failed}.", file=sys.stderr)
+            return 1
+        if plan.status == mod_manager.ApplyPlanStatus.UNEXPECTED:
+            print("ERROR: failed to build apply plan.", file=sys.stderr)
+            return 1
+
+        if not options.dry_run and not mod_manager.apply_required_mods(plan):
+            print("ERROR: failed to write blacklist.txt.", file=sys.stderr)
+            return 1
+
+        print(
+            "Summary: "
+            f"already-available={len(plan.already_available)}, "
+            f"downloaded={len(plan.downloaded)}, "
+            f"would-download={len(plan.would_download)}, "
+            f"enabled={len(plan.enabled_closure)}, "
+            f"blacklisted={len(plan.blacklisted)}"
+        )
+        if plan.downloaded:
+            print("Downloaded mods:")
+            for mod in plan.downloaded:
+                print(f"  - {mod.name} (v{mod.version}) [{mod.get_filename()}]")
+        if plan.would_download:
+            print("Would download:")
+            for mod_name in plan.would_download:
+                print(f"  - {mod_name}")
+        if plan.enabled_closure:
+            print("Enabled mods:")
+            for mod in plan.enabled_closure:
+                print(f"  - {mod.name} (v{mod.version}) [{mod.get_filename()}]")
+        if plan.blacklisted:
+            print("Blacklisted mods:")
+            for mod in plan.blacklisted:
+                print(f"  - {mod.name} (v{mod.version}) [{mod.get_filename()}]")
+        return 0
+
     def uninstall(
         self, args: Sequence[str], prog_name: str = "celeste-mod-manager uninstall"
     ) -> int:
