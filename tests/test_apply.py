@@ -133,6 +133,30 @@ def test_apply_skips_optional_dependencies_by_default(
     assert [mod.name for mod in plan.blacklisted] == ["OptionalDependency"]
 
 
+def test_apply_includes_optional_dependencies_when_requested(
+    mods_dir: Path, mod_zip_factory
+):
+    mod_zip_factory(
+        mods_dir,
+        "Root.zip",
+        "Root",
+        deps=[_dep("RequiredDependency")],
+        optional_deps=[_dep("OptionalDependency")],
+    )
+    mod_zip_factory(mods_dir, "RequiredDependency.zip", "RequiredDependency")
+    mod_zip_factory(mods_dir, "OptionalDependency.zip", "OptionalDependency")
+
+    plan = mod_manager.build_apply_plan(["Root"], optional=True)
+
+    assert plan.status == mod_manager.ApplyPlanStatus.READY
+    assert [mod.name for mod in plan.enabled_closure] == [
+        "OptionalDependency",
+        "RequiredDependency",
+        "Root",
+    ]
+    assert plan.blacklisted == []
+
+
 def test_apply_reports_duplicate_local_mod_names(mods_dir: Path, mod_zip_factory):
     mod_zip_factory(mods_dir, "Root-a.zip", "Root")
     mod_zip_factory(mods_dir, "Root-b.zip", "Root")
@@ -178,6 +202,29 @@ def test_apply_cli_requirement_file_rewrites_blacklist(
     assert "Requested mods: 1\n" in capsys.readouterr().out
     assert (mods_dir / "blacklist.txt").read_text(encoding="utf-8") == (
         _EXPECTED_BLACKLIST_HEADER + "Other.zip\n"
+    )
+
+
+def test_apply_cli_optional_deps_includes_optional_dependencies(
+    mods_dir: Path, mod_zip_factory
+):
+    mod_zip_factory(
+        mods_dir,
+        "Root.zip",
+        "Root",
+        optional_deps=[_dep("OptionalDependency")],
+    )
+    mod_zip_factory(mods_dir, "OptionalDependency.zip", "OptionalDependency")
+    requirement_path = mods_dir / "req.txt"
+    requirement_path.write_text("Root\n", encoding="utf-8")
+
+    exit_code = CelesteModCLI().apply(
+        ["--optional-deps", "-r", str(requirement_path)]
+    )
+
+    assert exit_code == 0
+    assert (mods_dir / "blacklist.txt").read_text(encoding="utf-8") == (
+        _EXPECTED_BLACKLIST_HEADER
     )
 
 

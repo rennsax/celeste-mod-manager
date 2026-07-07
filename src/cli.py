@@ -351,6 +351,7 @@ class CelesteModCLI:
                 Options:
                   -r, --requirement FILE  Requirement file to apply.
                   --dry-run               Show the planned target state without downloading or writing blacklist.txt.
+                  --optional-deps         Also include optional dependencies when resolving dependencies.
 
                 Experimental:
                   The apply command treats Mods as a local cache and rewrites blacklist.txt
@@ -366,6 +367,12 @@ class CelesteModCLI:
         parser.add_option("-r", "--requirement", dest="requirement", metavar="FILE")
         parser.add_option(
             "--dry-run", action="store_true", dest="dry_run", default=False
+        )
+        parser.add_option(
+            "--optional-deps",
+            action="store_true",
+            dest="optional_deps",
+            default=False,
         )
         parser.add_option("-h", "--help", action="store_true", dest="help")
 
@@ -413,7 +420,11 @@ class CelesteModCLI:
         if options.dry_run:
             print("Dry run: no downloads and no blacklist changes will be made.")
 
-        plan = mod_manager.build_apply_plan(required_mods, dry_run=options.dry_run)
+        plan = mod_manager.build_apply_plan(
+            required_mods,
+            optional=options.optional_deps,
+            dry_run=options.dry_run,
+        )
         if plan.status == mod_manager.ApplyPlanStatus.DUPLICATE_LOCAL_MOD:
             duplicates = ", ".join(plan.failed)
             print(
