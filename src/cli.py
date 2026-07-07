@@ -418,7 +418,9 @@ class CelesteModCLI:
         print(f"Applying declarative mod state from {requirement_path}")
         print(f"Requested mods: {len(required_mods)}")
         if options.dry_run:
-            print("Dry run: no downloads and no blacklist changes will be made.")
+            print(
+                "Dry run: no downloads, blacklist changes, or mod options order changes will be made."
+            )
 
         plan = mod_manager.build_apply_plan(
             required_mods,
@@ -448,7 +450,7 @@ class CelesteModCLI:
             return 1
 
         if not options.dry_run and not mod_manager.apply_required_mods(plan):
-            print("ERROR: failed to write blacklist.txt.", file=sys.stderr)
+            print("ERROR: failed to write generated mod state files.", file=sys.stderr)
             return 1
 
         print(
@@ -457,7 +459,8 @@ class CelesteModCLI:
             f"downloaded={len(plan.downloaded)}, "
             f"would-download={len(plan.would_download)}, "
             f"enabled={len(plan.enabled_closure)}, "
-            f"blacklisted={len(plan.blacklisted)}"
+            f"blacklisted={len(plan.blacklisted)}, "
+            f"mod-options-order={len(plan.mod_options_order)}"
         )
         if plan.downloaded:
             print("Downloaded mods:")
