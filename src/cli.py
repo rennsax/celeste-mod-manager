@@ -373,6 +373,12 @@ class CelesteModCLI:
         if options.help:
             show_help()
             return 0
+        if not config._ENABLE_EXPERIMENTAL_APPLY:
+            print(
+                "ERROR: experimental apply feature is not enabled.",
+                file=sys.stderr,
+            )
+            return 1
         print(
             "\033[1;33mWARNING: `apply' subcommand is experimental and its behavior may change "
             "in future versions.\033[0m"

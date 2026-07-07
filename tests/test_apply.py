@@ -1,7 +1,7 @@
 from pathlib import Path
 from types import SimpleNamespace
 
-from src import mod_manager
+from src import config, mod_manager
 from src.cli import CelesteModCLI
 
 
@@ -179,6 +179,21 @@ def test_apply_cli_requirement_file_rewrites_blacklist(
     assert (mods_dir / "blacklist.txt").read_text(encoding="utf-8") == (
         _EXPECTED_BLACKLIST_HEADER + "Other.zip\n"
     )
+
+
+def test_apply_cli_returns_error_when_experimental_apply_is_disabled(
+    mods_dir: Path, monkeypatch, capsys
+):
+    requirement_path = mods_dir / "req.txt"
+    requirement_path.write_text("Root\n", encoding="utf-8")
+    monkeypatch.setattr(config, "_ENABLE_EXPERIMENTAL_APPLY", False)
+
+    exit_code = CelesteModCLI().apply(["-r", str(requirement_path)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "experimental apply feature is not enabled" in captured.err
+    assert not (mods_dir / "blacklist.txt").exists()
 
 
 def test_apply_cli_uses_default_required_mods_path(mods_dir: Path, mod_zip_factory):
