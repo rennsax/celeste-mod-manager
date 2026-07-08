@@ -1,11 +1,19 @@
 from pathlib import Path
 
 from src import config, mod_manager
+from src.path import set_mod_paths
 
 
 def test_mods_dir_fixture_monkeypatches_config(mods_dir: Path):
     assert config.MODS_DIR == str(mods_dir)
     assert config._ENABLE_ROOT_INSTALL_TRACK is True
+
+
+def test_set_mod_paths_stores_mod_db_in_mods_dir(tmp_path: Path):
+    set_mod_paths(tmp_path)
+
+    assert config.MODS_DIR == str(tmp_path / "Mods")
+    assert config.MOD_DB_PATH == str(tmp_path / "Mods" / "celeste_mod_db.json")
 
 
 def test_dummy_mod_zip_is_loaded_from_monkeypatched_mods_dir(

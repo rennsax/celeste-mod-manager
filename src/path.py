@@ -20,5 +20,5 @@ def get_celeste_dir() -> Path | None:
 
 
 def set_mod_paths(celeste_dir: Path):
-    config.MOD_DB_PATH = os.path.join(celeste_dir, "celeste_mod_db.json")
     config.MODS_DIR = os.path.join(celeste_dir, "Mods")
+    config.MOD_DB_PATH = os.path.join(config.MODS_DIR, "celeste_mod_db.json")
