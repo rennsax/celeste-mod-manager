@@ -23,13 +23,16 @@ Commands:
     list               List all installed mods.
     list-tree          List all installed mods and their dependencies in a tree format.
     install            Install some mod(s).
-    apply              EXPERIMENTAL: Apply Mods/required_mods.txt declaratively.
     uninstall          Uninstall root mod(s).
     disable            Disable mod(s) by adding them to Mods/blacklist.txt.
     enable             Enable mod(s) by removing them from Mods/blacklist.txt.
     check-updates      Check updates for installed mods.
     update-db          Force update the local mod database from the server.
     upgrade            Upgrade some mod(s) to the latest version.
+
+Experimental commands:
+    apply              Apply the mod specification (by default Mods/required_mods.txt
+                       under the Celeste directory) declaratively.
 
 Options:
     --celeste-dir <path>  Specify the path to the Celeste directory.

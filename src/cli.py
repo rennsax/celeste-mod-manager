@@ -350,12 +350,13 @@ class CelesteModCLI:
 
                 Options:
                   -r, --requirement FILE  Requirement file to apply.
-                  --dry-run               Show the planned target state without downloading or writing blacklist.txt.
+                  --dry-run               Show the planned target state without downloading
+                                          or writing any configuration files.
                   --optional-deps         Also include optional dependencies when resolving dependencies.
 
-                Experimental:
-                  The apply command treats Mods as a local cache and rewrites blacklist.txt
-                  from the requested mods plus their required dependencies."""
+                Note: this command is experimental! Its behavior might be changed in the future.
+
+                The apply command treats Mods as a local cache and rewrites blacklist.txt / modoptionsoder.txt from the requested mods plus their required dependencies."""
                 )
             )
 
