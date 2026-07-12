@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from src import mod_manager
+from src import config, mod_manager
 
 
 def _dep(name: str, version: str = "1.0.0") -> dict[str, str]:
@@ -232,6 +232,39 @@ def test_uninstall_removes_mods_from_blacklist(
     assert (mods_dir / "blacklist.txt").read_text(encoding="utf-8") == (
         _EXPECTED_BLACKLIST_HEADER + "OtherDisabled.zip\n"
     )
+
+
+def test_uninstall_mods_ignores_root_record_when_root_tracking_disabled(
+    mods_dir: Path, mod_zip_factory, monkeypatch
+):
+    monkeypatch.setattr(config, "_ENABLE_ROOT_INSTALL_TRACK", False)
+    mod_zip_factory(mods_dir, "Root.zip", "Root")
+    (mods_dir / "installed_mods.yml").write_text("not: [valid\n", encoding="utf-8")
+    _write_blacklist(mods_dir, ["Root.zip", "OtherDisabled.zip"])
+    mod = next(mod for mod in mod_manager.get_installed_mods() if mod.name == "Root")
+
+    assert mod_manager.uninstall_mods([mod])
+    assert (mods_dir / "blacklist.txt").read_text(encoding="utf-8") == (
+        _EXPECTED_BLACKLIST_HEADER + "OtherDisabled.zip\n"
+    )
+
+
+def test_root_tracking_commands_report_disabled_when_root_tracking_disabled(
+    mods_dir: Path, mod_zip_factory, monkeypatch
+):
+    monkeypatch.setattr(config, "_ENABLE_ROOT_INSTALL_TRACK", False)
+    mod_zip_factory(mods_dir, "Root.zip", "Root")
+
+    disable_mods, disable_status = mod_manager.build_disable_plan("Root")
+    enable_mods, enable_status = mod_manager.build_enable_plan("Root")
+    uninstall_mods, uninstall_status = mod_manager.build_uninstall_plan("Root")
+
+    assert disable_mods == []
+    assert disable_status == mod_manager.ModToggleStatus.ROOT_TRACK_DISABLED
+    assert enable_mods == []
+    assert enable_status == mod_manager.ModToggleStatus.ROOT_TRACK_DISABLED
+    assert uninstall_mods == []
+    assert uninstall_status == mod_manager.UninstallModStatus.ROOT_TRACK_DISABLED
 
 
 def test_build_plans_report_missing_and_unchanged_states(

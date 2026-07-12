@@ -164,6 +164,9 @@ def _get_mod_dependency_closure_from_installed_dict(
 
 
 def get_mods_exclusively_depending_on_closure(mod: Mod) -> list[Mod]:
+    if not config._ENABLE_ROOT_INSTALL_TRACK:
+        return [mod]
+
     installed_mods = get_installed_mods()
     installed_dict = {
         installed_mod.name: installed_mod for installed_mod in installed_mods
@@ -585,9 +588,7 @@ def analyse_mod_deps(maxdepth: int, optional: bool = False, enabled_only: bool =
             return
     roots.sort(key=lambda x: x.lower())
 
-    recorded_root_names = set()
-    if config._ENABLE_ROOT_INSTALL_TRACK:
-        recorded_root_names = {mod.name for mod in get_root_mods()}
+    recorded_root_names = {mod.name for mod in get_root_mods()}
     orphan_roots = (
         {
             root
@@ -723,6 +724,9 @@ def _remove_root_installed_mods(mod_names: set[str]) -> None:
 
 
 def get_root_mods() -> list[Mod]:
+    if not config._ENABLE_ROOT_INSTALL_TRACK:
+        return []
+
     installed_mods_path = _get_installed_mods_record_path()
     if not os.path.exists(installed_mods_path):
         return []
@@ -1323,7 +1327,7 @@ class UpdateModStatus(Enum):
 
 def update_mod(mod: Mod) -> tuple[Mod | None, UpdateModStatus]:
     """Check if there's an update for the given mod. If there is, download and install it. Return the updated mod (or the original mod if it's already up to date) and the status."""
-    root_mods = get_root_mods() if config._ENABLE_ROOT_INSTALL_TRACK else []
+    root_mods = get_root_mods()
     try:
         mod_info = get_mod_info(mod.name)
         if not mod_info:

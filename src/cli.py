@@ -192,7 +192,7 @@ class CelesteModCLI:
 
     def list_mods(
         self, args: list[str], prog_name: str = "celeste-mod-manager list"
-    ) -> None:
+    ) -> int:
         """List installed mods."""
         parser = optparse.OptionParser(prog=prog_name)
         parser.add_option(
@@ -222,6 +222,7 @@ class CelesteModCLI:
                 mod for mod in mods if mod.get_filename() not in blacklisted_filenames
             ]
         mod_manager.pretty_print_mods(mods, show_enabled=not options.enabled_only)
+        return 0
 
     def list_tree(
         self, args: list[str], prog_name: str = "celeste-mod-manager list-tree"

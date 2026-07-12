@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from src import config
 from src.cli import CelesteModCLI
 
 
@@ -40,6 +41,18 @@ def test_list_mods_root_only_prints_recorded_root_mods(
         "------- ------- -------\n"
         "RootMod 1.0.0     ON   \n"
     )
+
+
+def test_list_mods_root_only_uses_empty_root_mods_when_root_tracking_disabled(
+    mods_dir: Path, monkeypatch, capsys
+):
+    monkeypatch.setattr(config, "_ENABLE_ROOT_INSTALL_TRACK", False)
+
+    assert CelesteModCLI().list_mods(["--root"]) == 0
+
+    captured = capsys.readouterr()
+    assert captured.out == "No mods installed.\n"
+    assert captured.err == ""
 
 
 def test_list_mods_marks_disabled_mods(mods_dir: Path, mod_zip_factory, capsys):

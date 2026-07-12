@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from src import mod_manager
+from src import config, mod_manager
 
 
 def _dep(name: str, version: str = "1.0.0") -> dict[str, str]:
@@ -28,6 +28,20 @@ def _exclusive_closure_names(mod_name: str) -> list[str]:
             _installed_mod(mod_name)
         )
     ]
+
+
+def test_get_root_mods_returns_empty_when_root_tracking_disabled_without_parsing(
+    mods_dir: Path, monkeypatch
+):
+    monkeypatch.setattr(config, "_ENABLE_ROOT_INSTALL_TRACK", False)
+    (mods_dir / "installed_mods.yml").write_text("not: [valid\n", encoding="utf-8")
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("installed_mods.yml should not be parsed")
+
+    monkeypatch.setattr(mod_manager.yaml, "safe_load", fail_if_called)
+
+    assert mod_manager.get_root_mods() == []
 
 
 def test_dependency_closure_includes_mod_and_required_recursive_dependencies(
