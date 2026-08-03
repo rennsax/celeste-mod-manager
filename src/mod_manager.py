@@ -1,5 +1,6 @@
 import os
 import sys
+import tempfile
 import urllib.request
 import time
 from dataclasses import dataclass, field
@@ -10,6 +11,9 @@ from loguru import logger
 from . import config
 from .mod import Mod
 from .mod_db import ModInfo, get_mod_info
+
+
+_DOWNLOAD_MAX_ATTEMPTS = 3
 
 
 def _format_size(num_bytes: int | float | None) -> str:
@@ -77,29 +81,58 @@ def _download_mod(mod_info: ModInfo) -> Mod | None:
     print(f"Collecting {mod_info.name}")
     print(f"  Downloading {filename} ({_format_size(expected_size)})")
     logger.debug(f"Downloading '{mod_info.name}' from '{url}'...")
-    try:
-        urllib.request.urlretrieve(
-            url, filepath, reporthook=_make_download_reporthook(expected_size)
-        )
-        print(f"  Saved {filename}")
-        logger.debug(f"Downloaded '{filename}' successfully.")
-        mod = Mod.from_filename(filename)
-        if not mod:
-            logger.error(f"Downloaded '{filename}' is not a valid mod archive.")
-            return None
-        if mod.name != mod_info.name or mod.version != mod_info.version:
-            logger.warning(
-                f"Downloaded mod metadata mismatch for '{filename}': "
-                f"database={mod_info.name} {mod_info.version}, "
-                f"archive={mod.name} {mod.version}"
+    last_error: Exception | None = None
+
+    for attempt in range(1, _DOWNLOAD_MAX_ATTEMPTS + 1):
+        temporary_filepath: str | None = None
+
+        try:
+            fd, temporary_filepath = tempfile.mkstemp(
+                prefix=f".{filename}.", suffix=".download.zip", dir=config.MODS_DIR
             )
-        return mod
-    except Exception as e:
-        logger.error(f"Failed to download '{filename}': {e}")
-        # remove the file if it was partially downloaded
-        if os.path.exists(filepath):
-            os.remove(filepath)
-        return None
+            os.close(fd)
+            temporary_filename = os.path.basename(temporary_filepath)
+            urllib.request.urlretrieve(
+                url,
+                temporary_filepath,
+                reporthook=_make_download_reporthook(expected_size),
+            )
+            mod = Mod.from_filename(temporary_filename)
+            if not mod:
+                raise ValueError("downloaded file is not a valid mod archive")
+
+            os.replace(temporary_filepath, filepath)
+            mod.filepath = filepath
+            print(f"  Saved {filename}")
+            logger.debug(f"Downloaded '{filename}' successfully.")
+            if mod.name != mod_info.name or mod.version != mod_info.version:
+                logger.warning(
+                    f"Downloaded mod metadata mismatch for '{filename}': "
+                    f"database={mod_info.name} {mod_info.version}, "
+                    f"archive={mod.name} {mod.version}"
+                )
+            return mod
+        except Exception as e:
+            last_error = e
+            logger.warning(
+                f"Download attempt {attempt}/{_DOWNLOAD_MAX_ATTEMPTS} "
+                f"for '{filename}' failed: {e}"
+            )
+        finally:
+            if temporary_filepath and os.path.exists(temporary_filepath):
+                try:
+                    os.remove(temporary_filepath)
+                except OSError as e:
+                    logger.warning(
+                        f"Failed to remove temporary download "
+                        f"'{temporary_filepath}': {e}"
+                    )
+
+    logger.error(
+        f"Failed to download '{filename}' after {_DOWNLOAD_MAX_ATTEMPTS} attempts: "
+        f"{last_error}"
+    )
+    return None
 
 
 def get_installed_mods() -> list[Mod]:

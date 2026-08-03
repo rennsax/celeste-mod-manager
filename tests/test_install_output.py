@@ -42,6 +42,73 @@ def test_download_mod_prints_progress(
     assert "  Downloading DownloadedMod-1.0.0.zip (100 B)\n" in output
     assert "100% 100 B/100 B" in output
     assert "  Saved DownloadedMod-1.0.0.zip\n" in output
+    assert not list(mods_dir.glob("*.download.zip"))
+
+
+def test_download_mod_retries_then_publishes_valid_archive(
+    mods_dir: Path, mod_zip_factory, monkeypatch
+):
+    attempts = 0
+
+    def fake_urlretrieve(url, filepath, reporthook=None):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError("temporary network failure")
+        if attempts == 2:
+            Path(filepath).write_bytes(b"not a zip file")
+            return
+        path = Path(filepath)
+        mod_zip_factory(path.parent, path.name, "DownloadedMod", "1.0.0")
+
+    monkeypatch.setattr(mod_manager.urllib.request, "urlretrieve", fake_urlretrieve)
+
+    mod = mod_manager._download_mod(_mod_info("DownloadedMod"))
+
+    assert attempts == 3
+    assert mod is not None
+    assert mod.filepath == str(mods_dir / "DownloadedMod-1.0.0.zip")
+    assert mod_manager.Mod.from_filename("DownloadedMod-1.0.0.zip") is not None
+    assert not list(mods_dir.glob("*.download.zip"))
+
+
+def test_download_mod_failure_does_not_create_invalid_archive(
+    mods_dir: Path, monkeypatch
+):
+    attempts = 0
+
+    def fake_urlretrieve(url, filepath, reporthook=None):
+        nonlocal attempts
+        attempts += 1
+        Path(filepath).write_bytes(b"not a zip file")
+
+    monkeypatch.setattr(mod_manager.urllib.request, "urlretrieve", fake_urlretrieve)
+
+    mod = mod_manager._download_mod(_mod_info("DownloadedMod"))
+
+    assert attempts == mod_manager._DOWNLOAD_MAX_ATTEMPTS
+    assert mod is None
+    assert not (mods_dir / "DownloadedMod-1.0.0.zip").exists()
+    assert not list(mods_dir.glob("*.download.zip"))
+
+
+def test_download_mod_failure_preserves_existing_archive(
+    mods_dir: Path, mod_zip_factory, monkeypatch
+):
+    mod_zip_factory(mods_dir, "DownloadedMod-1.0.0.zip", "ExistingMod", "0.9.0")
+    original_contents = (mods_dir / "DownloadedMod-1.0.0.zip").read_bytes()
+
+    def fake_urlretrieve(url, filepath, reporthook=None):
+        raise OSError("temporary network failure")
+
+    monkeypatch.setattr(mod_manager.urllib.request, "urlretrieve", fake_urlretrieve)
+
+    mod = mod_manager._download_mod(_mod_info("DownloadedMod"))
+
+    assert mod is None
+    assert (mods_dir / "DownloadedMod-1.0.0.zip").read_bytes() == original_contents
+    assert mod_manager.Mod.from_filename("DownloadedMod-1.0.0.zip").name == "ExistingMod"
+    assert not list(mods_dir.glob("*.download.zip"))
 
 
 def test_resolve_deps_prints_dependency_progress(
