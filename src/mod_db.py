@@ -2,9 +2,9 @@ import os
 import urllib.request
 import json
 import time
-from typing import Callable, Any
 from dataclasses import dataclass
 from loguru import logger
+from rapidfuzz import fuzz
 
 from . import config
 
@@ -116,14 +116,65 @@ def get_mod_info(mod_name: str) -> ModInfo | None:
     return None
 
 
-def search_mod_in_db(predicate: Callable[[ModInfo], Any]) -> list[ModInfo]:
+def _compact_mod_name(name: str) -> str:
+    """Normalize a name and remove separators for direct matching."""
+    return "".join(character for character in name.casefold() if character.isalnum())
+
+
+def _fuzzy_name_score(query: str, candidate: str) -> float:
+    """Score a compact name against similarly sized windows in a candidate."""
+    window_radius = 1 if len(query) < 6 else 2
+    minimum_window_size = max(1, len(query) - window_radius)
+    maximum_window_size = min(len(candidate), len(query) + window_radius)
+    if maximum_window_size < minimum_window_size:
+        return 0.0
+
+    return max(
+        fuzz.ratio(query, candidate[start : start + window_size])
+        for window_size in range(minimum_window_size, maximum_window_size + 1)
+        for start in range(len(candidate) - window_size + 1)
+    )
+
+
+def search_mod_by_name(query: str) -> list[ModInfo]:
+    """Search mod names using direct matching followed by fuzzy matching."""
     mod_list = get_mod_db(f"{config.WEGFAN_API_URL}/mod/list")
-    founded_mods = []
-    for mod_info_dict in mod_list:
-        mod_info = ModInfo.from_dict(mod_info_dict)
-        if predicate(mod_info):
-            founded_mods.append(mod_info)
-    return founded_mods
+    mods = [ModInfo.from_dict(mod_info_dict) for mod_info_dict in mod_list]
+
+    compact_query = _compact_mod_name(query)
+    if not compact_query:
+        return []
+
+    direct_matches: list[tuple[int, ModInfo]] = []
+    fuzzy_candidates: list[tuple[ModInfo, str]] = []
+
+    for mod in mods:
+        compact_name = _compact_mod_name(mod.name)
+        if compact_name == compact_query:
+            direct_matches.append((0, mod))
+        elif compact_name.startswith(compact_query):
+            direct_matches.append((1, mod))
+        elif compact_query in compact_name:
+            direct_matches.append((2, mod))
+        else:
+            fuzzy_candidates.append((mod, compact_name))
+
+    direct_matches.sort(key=lambda match: (match[0], match[1].name.casefold()))
+    found_mods = [mod for _, mod in direct_matches]
+    if found_mods:
+        return found_mods
+
+    if len(compact_query) < 4:
+        return []
+
+    ranked_fuzzy_mods = []
+    for mod, compact_name in fuzzy_candidates:
+        score = _fuzzy_name_score(compact_query, compact_name)
+        if score >= 80:
+            ranked_fuzzy_mods.append((score, mod))
+    ranked_fuzzy_mods.sort(key=lambda match: (-match[0], match[1].name.casefold()))
+
+    return [mod for _, mod in ranked_fuzzy_mods[:5]]
 
 
 def pretty_print_mod_info(mod_info: ModInfo):

@@ -176,9 +176,7 @@ class CelesteModCLI:
     def search(self, args: list[str]) -> None:
         """Search for mods in the database and print their information."""
         pattern = args[0]
-        found_mods = mod_db.search_mod_in_db(
-            lambda m: pattern.lower() in m.name.lower()
-        )
+        found_mods = mod_db.search_mod_by_name(pattern)
         if not found_mods:
             print(f"No mods found.")
             return
