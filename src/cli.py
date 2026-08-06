@@ -480,6 +480,42 @@ class CelesteModCLI:
                 print(f"  - {mod.name} (v{mod.version}) [{mod.get_filename()}]")
         return 0
 
+    def garbage_collect(
+        self,
+        args: Sequence[str],
+        prog_name: str = "celeste-mod-manager garbage-collect",
+    ) -> int:
+        """Delete locally installed mods that are currently disabled."""
+        parser = optparse.OptionParser(prog=prog_name)
+        _, positionals = parser.parse_args(list(args))
+        if positionals:
+            print(
+                f"ERROR: unexpected argument(s): {' '.join(positionals)}",
+                file=sys.stderr,
+            )
+            return 1
+
+        mods_to_delete = mod_manager.build_garbage_collect_plan()
+        if not mods_to_delete:
+            print("No disabled mods to delete.")
+            return 0
+
+        print("The following disabled mod(s) will be deleted:")
+        for mod in mods_to_delete:
+            print(f"  - {mod.name} (v{mod.version}) [{mod.get_filename()}]")
+
+        answer = input("Proceed? [y/N] ").strip().lower()
+        if answer not in ("y", "yes"):
+            print("Skipped deleting mods.")
+            return 0
+
+        if mod_manager.garbage_collect_mods(mods_to_delete):
+            print("Successfully deleted mods.")
+            return 0
+
+        print("ERROR: failed to delete mods.", file=sys.stderr)
+        return 1
+
     def uninstall(
         self, args: Sequence[str], prog_name: str = "celeste-mod-manager uninstall"
     ) -> int:

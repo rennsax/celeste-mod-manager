@@ -24,6 +24,8 @@ Commands:
     list-tree          List all installed mods and their dependencies in a tree format.
     install            Install some mod(s).
     uninstall          Uninstall root mod(s).
+    gc, garbage-collect
+                       Delete all currently disabled mod archives.
     disable            Disable mod(s) by adding them to Mods/blacklist.txt.
     enable             Enable mod(s) by removing them from Mods/blacklist.txt.
     check-updates      Check updates for installed mods.
@@ -137,6 +139,10 @@ def main():
         return cli.install(extra_args, prog_name=f"celeste-mod-manager install")
     elif subcommand == "apply":
         return cli.apply(extra_args, prog_name=f"celeste-mod-manager apply")
+    elif subcommand in {"gc", "garbage-collect"}:
+        return cli.garbage_collect(
+            extra_args, prog_name=f"celeste-mod-manager {subcommand}"
+        )
     elif subcommand == "uninstall":
         return cli.uninstall(extra_args, prog_name=f"celeste-mod-manager uninstall")
     elif subcommand == "disable":

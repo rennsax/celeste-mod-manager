@@ -12,7 +12,6 @@ from . import config
 from .mod import Mod
 from .mod_db import ModInfo, get_mod_info
 
-
 _DOWNLOAD_MAX_ATTEMPTS = 3
 
 
@@ -413,9 +412,8 @@ def _print_dependency_tree(
     ):
         if is_root:
             display_node = f"{node} ({installed_dict[node].version})"
-            if (
-                show_disabled
-                and not _is_mod_enabled(installed_dict[node], blacklisted_filenames)
+            if show_disabled and not _is_mod_enabled(
+                installed_dict[node], blacklisted_filenames
             ):
                 display_node = f"{display_node} \033[91m[DISABLED]\033[0m"
             if node in orphan_roots:
@@ -502,9 +500,7 @@ def _analyse_enabled_mod_deps(maxdepth: int, optional: bool = False):
         return
 
     blacklisted_filenames = get_blacklisted_mod_filenames()
-    enabled_mods = [
-        mod for mod in mods if _is_mod_enabled(mod, blacklisted_filenames)
-    ]
+    enabled_mods = [mod for mod in mods if _is_mod_enabled(mod, blacklisted_filenames)]
     if not enabled_mods:
         print("No mods installed.")
         return
@@ -1067,6 +1063,35 @@ def enable_mods(mods: list[Mod]) -> bool:
         return True
     except Exception as e:
         logger.error(f"Failed to enable mods: {e}")
+        return False
+
+
+def build_garbage_collect_plan() -> list[Mod]:
+    """Return disabled local mod archives that can be safely removed."""
+    blacklisted_filenames = get_blacklisted_mod_filenames()
+    return sorted(
+        (
+            mod
+            for mod in get_installed_mods()
+            if not _is_mod_enabled(mod, blacklisted_filenames)
+        ),
+        key=lambda mod: (mod.name.lower(), mod.get_filename().lower()),
+    )
+
+
+def garbage_collect_mods(mods: list[Mod]) -> bool:
+    """Delete planned mod archives and remove their blacklist entries."""
+    try:
+        filenames_to_remove = {mod.get_filename() for mod in mods}
+        for mod in mods:
+            if os.path.exists(mod.filepath):
+                os.remove(mod.filepath)
+            else:
+                logger.warning(f"Mod file '{mod.filepath}' does not exist.")
+        _write_blacklist_filenames(filenames_to_remove=filenames_to_remove)
+        return True
+    except Exception as e:
+        logger.error(f"Failed to garbage collect mods: {e}")
         return False
 
 
