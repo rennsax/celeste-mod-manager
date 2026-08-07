@@ -269,17 +269,34 @@ class CelesteModCLI:
             print("No mods installed.")
             return 0
 
+        try:
+            update_blacklisted_filenames = (
+                mod_manager.get_update_blacklisted_mod_filenames()
+            )
+        except OSError as e:
+            print(f"ERROR: failed to read update blacklist: {e}", file=sys.stderr)
+            return 1
+
         name_width = max(len(mod.name) for mod in mods)
-        status_width = len("[OUTDATED]")
+        status_width = max(len("[OUTDATED]"), len("[BLACKLISTED]"))
         up_to_date_count = 0
         update_available_count = 0
         skipped_count = 0
+        blacklisted_count = 0
 
         print("-" * 72)
         print(f"{'Status':<{status_width}}  {'Mod':<{name_width}}  Version")
         print("-" * 72)
 
         for mod in mods:
+            if mod.get_filename() in update_blacklisted_filenames:
+                print(
+                    f"{'[BLACKLISTED]':<{status_width}}  {mod.name:<{name_width}}  "
+                    f"local={mod.version}  remote=not checked"
+                )
+                blacklisted_count += 1
+                continue
+
             cur_mod_info = mod_db.get_mod_info(mod.name)
             if cur_mod_info is None:
                 print(
@@ -302,7 +319,8 @@ class CelesteModCLI:
         print("-" * 72)
         print(
             f"Summary: total={len(mods)}, outdated={update_available_count}, "
-            f"up-to-date={up_to_date_count}, skipped={skipped_count}"
+            f"up-to-date={up_to_date_count}, skipped={skipped_count}, "
+            f"blacklisted={blacklisted_count}"
         )
         return 0
 

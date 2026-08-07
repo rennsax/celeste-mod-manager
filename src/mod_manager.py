@@ -844,6 +844,10 @@ def _get_blacklist_path() -> str:
     return os.path.join(config.MODS_DIR, "blacklist.txt")
 
 
+def _get_update_blacklist_path() -> str:
+    return os.path.join(config.MODS_DIR, "updaterblacklist.txt")
+
+
 def _get_mod_options_order_path() -> str:
     return os.path.join(config.MODS_DIR, "modoptionsorder.txt")
 
@@ -865,6 +869,19 @@ def get_blacklisted_mod_filenames() -> set[str]:
             continue
         filenames.add(entry)
     return filenames
+
+
+def get_update_blacklisted_mod_filenames() -> set[str]:
+    update_blacklist_path = _get_update_blacklist_path()
+    if not os.path.exists(update_blacklist_path):
+        return set()
+
+    with open(update_blacklist_path, "r", encoding="utf-8") as f:
+        return {
+            entry
+            for line in f
+            if (entry := line.strip()) and not entry.startswith("#")
+        }
 
 
 def _write_blacklist_filenames(

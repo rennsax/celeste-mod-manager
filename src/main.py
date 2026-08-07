@@ -28,7 +28,8 @@ Commands:
                        Delete all currently disabled mod archives.
     disable            Disable mod(s) by adding them to Mods/blacklist.txt.
     enable             Enable mod(s) by removing them from Mods/blacklist.txt.
-    check-updates      Check updates for installed mods.
+    check-updates      Check updates for installed mods. Entries in
+                       Mods/updaterblacklist.txt are marked and not checked.
     update-db          Force update the local mod database from the server.
     upgrade            Upgrade some mod(s) to the latest version.
 
