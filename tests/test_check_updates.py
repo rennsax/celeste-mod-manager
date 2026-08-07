@@ -32,7 +32,7 @@ def test_get_update_blacklisted_mod_filenames_returns_empty_when_file_is_missing
     assert mod_manager.get_update_blacklisted_mod_filenames() == set()
 
 
-def test_check_updates_marks_blacklisted_archives_without_remote_lookup(
+def test_check_updates_sorts_mods_and_skips_blacklisted_remote_lookups(
     mods_dir: Path, mod_zip_factory, monkeypatch, capsys
 ):
     excluded = _installed_mod(
@@ -66,16 +66,16 @@ def test_check_updates_marks_blacklisted_archives_without_remote_lookup(
 
     assert CelesteModCLI().check_updates([]) == 0
 
-    assert queried_names == ["Outdated", "Current", "Unknown"]
+    assert queried_names == ["Current", "Outdated", "Unknown"]
     assert capsys.readouterr().out == (
         "-" * 72
         + "\n"
         + "Status         Mod       Version\n"
         + "-" * 72
         + "\n"
+        + "\033[92m[OK]         \033[0m  Current   1.0.0\n"
         + "[BLACKLISTED]  Excluded  local=1.0.0  remote=not checked\n"
         + "\033[93m[OUTDATED]   \033[0m  Outdated  1.0.0 -> 2.0.0\n"
-        + "\033[92m[OK]         \033[0m  Current   1.0.0\n"
         + "[SKIP]         Unknown   local=1.0.0  remote=unknown\n"
         + "-" * 72
         + "\n"

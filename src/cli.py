@@ -264,7 +264,9 @@ class CelesteModCLI:
 
     def check_updates(self, args: list[str]) -> int:
         """Check for updates for all installed mods."""
-        mods = mod_manager.get_installed_mods()
+        mods = sorted(
+            mod_manager.get_installed_mods(), key=lambda mod: mod.name.lower()
+        )
         if not mods:
             print("No mods installed.")
             return 0
