@@ -915,6 +915,41 @@ def _replace_mod_options_order_entries(entries: list[str]) -> None:
         f.write("\n".join(new_lines).rstrip() + "\n")
 
 
+def _replace_mod_options_order_filename(
+    old_filename: str, new_filename: str
+) -> bool:
+    """Replace existing archive entries without rewriting a user's order file."""
+    mod_options_order_path = _get_mod_options_order_path()
+    if not os.path.exists(mod_options_order_path):
+        return False
+
+    with open(mod_options_order_path, "r", encoding="utf-8", newline="") as f:
+        lines = f.read().splitlines(keepends=True)
+
+    replaced = False
+    new_lines = []
+    for line in lines:
+        line_body = line.rstrip("\r\n")
+        entry = line_body.strip()
+        if entry == old_filename and not entry.startswith("#"):
+            leading_whitespace = line_body[: len(line_body) - len(line_body.lstrip())]
+            trailing_whitespace = line_body[len(line_body.rstrip()) :]
+            line_ending = line[len(line_body) :]
+            new_lines.append(
+                f"{leading_whitespace}{new_filename}{trailing_whitespace}{line_ending}"
+            )
+            replaced = True
+        else:
+            new_lines.append(line)
+
+    if not replaced:
+        return False
+
+    with open(mod_options_order_path, "w", encoding="utf-8", newline="") as f:
+        f.write("".join(new_lines))
+    return True
+
+
 def _is_mod_enabled(mod: Mod, blacklisted_filenames: set[str]) -> bool:
     return mod.get_filename() not in blacklisted_filenames
 
@@ -1398,6 +1433,17 @@ def update_mod(mod: Mod) -> tuple[Mod | None, UpdateModStatus]:
         updated_mod = _download_mod(mod_info)
         if updated_mod is None:
             return None, UpdateModStatus.DOWNLOAD_FAILED
+        if updated_mod.get_filename() != mod.get_filename():
+            try:
+                _replace_mod_options_order_filename(
+                    mod.get_filename(), updated_mod.get_filename()
+                )
+            except Exception as e:
+                print(
+                    f"WARNING: failed to update mod options order from "
+                    f"'{mod.get_filename()}' to '{updated_mod.get_filename()}': {e}.",
+                    file=sys.stderr,
+                )
         if updated_mod.filepath != mod.filepath:
             os.remove(mod.filepath)
         for root_mod in root_mods:
