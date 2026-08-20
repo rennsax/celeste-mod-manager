@@ -29,6 +29,7 @@ dependencies = [
     "rapidfuzz",
     "rich>=15.0.0",
     "vdf",
+    "xxhash",
 ]
 
 [project.optional-dependencies]

@@ -74,7 +74,28 @@ class ModInfo:
         return cls(**data_copy)
 
 
-def get_mod_db(url: str, force_update: bool = config.FORCE_UPDATE_DEFAULT) -> dict:
+def get_cached_mod_db() -> list[dict]:
+    """Read the cached mod database without applying the refresh TTL."""
+    with open(config.MOD_DB_PATH, "r", encoding="utf-8") as f:
+        cached_data = json.load(f)
+
+    mod_list = cached_data.get("data")
+    if not isinstance(mod_list, list):
+        raise ValueError("the local mod database does not contain a valid data list")
+    return mod_list
+
+
+def index_mod_infos(mod_list: list[dict]) -> dict[str, ModInfo]:
+    """Parse database entries into a name-indexed mapping."""
+    return {
+        mod_info.name: mod_info
+        for mod_info in (ModInfo.from_dict(entry) for entry in mod_list)
+    }
+
+
+def get_mod_db(
+    url: str, force_update: bool = config.FORCE_UPDATE_DEFAULT
+) -> list[dict]:
     needs_update = force_update or not os.path.exists(config.MOD_DB_PATH)
 
     if not needs_update:
@@ -104,8 +125,7 @@ def get_mod_db(url: str, force_update: bool = config.FORCE_UPDATE_DEFAULT) -> di
         with open(config.MOD_DB_PATH, "w", encoding="utf-8") as f:
             json.dump(db_data, f, ensure_ascii=False)
 
-    with open(config.MOD_DB_PATH, "r", encoding="utf-8") as f:
-        return json.load(f).get("data", [])
+    return get_cached_mod_db()
 
 
 def get_mod_info(mod_name: str) -> ModInfo | None:

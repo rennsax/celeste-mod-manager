@@ -4,7 +4,6 @@ from types import SimpleNamespace
 from src import config, mod_manager
 from src.cli import CelesteModCLI
 
-
 _EXPECTED_BLACKLIST_HEADER = (
     "# This is the blacklist. Lines starting with # are ignored.\n"
     "# Mod folders and archives listed in this file will be disabled.\n"
@@ -28,10 +27,11 @@ def _dep(name: str, version: str = "1.0.0") -> dict[str, str]:
     return {"Name": name, "Version": version}
 
 
-def _mod_info(name: str, version: str = "1.0.0"):
+def _mod_info(name: str, version: str = "1.0.0", xx_hashes: list[str] | None = None):
     return SimpleNamespace(
         name=name,
         version=version,
+        xxHash=xx_hashes if xx_hashes is not None else ["0" * 16],
         submissionFile=SimpleNamespace(
             url=f"https://example.invalid/{name}.zip",
             size=100,
@@ -44,10 +44,7 @@ def test_parse_required_mods_file_ignores_empty_lines_and_line_comments(
 ):
     requirement_path = tmp_path / "required_mods.txt"
     requirement_path.write_text(
-        "\n"
-        "# comment\n"
-        "  StrawberryJam2021  \n"
-        "Another Mod\n",
+        "\n" "# comment\n" "  StrawberryJam2021  \n" "Another Mod\n",
         encoding="utf-8",
     )
 
@@ -125,9 +122,42 @@ def test_apply_downloads_missing_root_and_dependency(
     assert not (mods_dir / "installed_mods.yml").exists()
 
 
-def test_apply_skips_optional_dependencies_by_default(
-    mods_dir: Path, mod_zip_factory
+def test_apply_reports_checksum_failure_for_missing_root(
+    mods_dir: Path, monkeypatch, capsys
 ):
+    monkeypatch.setattr(mod_manager, "get_mod_info", lambda name: _mod_info(name))
+
+    def fake_urlretrieve(url, filepath, reporthook=None):
+        Path(filepath).write_bytes(b"unexpected complete root download")
+
+    monkeypatch.setattr(mod_manager.urllib.request, "urlretrieve", fake_urlretrieve)
+
+    plan = mod_manager.build_apply_plan(["Root"])
+
+    assert plan.status == mod_manager.ApplyPlanStatus.CHECKSUM_FAILED
+    assert plan.failed == ["Root"]
+    assert "file integrity check failed for mod 'Root'" in capsys.readouterr().err
+
+
+def test_apply_reports_checksum_failure_for_dependency(
+    mods_dir: Path, mod_zip_factory, monkeypatch, capsys
+):
+    mod_zip_factory(mods_dir, "Root.zip", "Root", deps=[_dep("Dependency")])
+    monkeypatch.setattr(mod_manager, "get_mod_info", lambda name: _mod_info(name))
+
+    def fake_urlretrieve(url, filepath, reporthook=None):
+        Path(filepath).write_bytes(b"unexpected complete dependency download")
+
+    monkeypatch.setattr(mod_manager.urllib.request, "urlretrieve", fake_urlretrieve)
+
+    plan = mod_manager.build_apply_plan(["Root"])
+
+    assert plan.status == mod_manager.ApplyPlanStatus.CHECKSUM_FAILED
+    assert plan.failed == ["Dependency"]
+    assert "file integrity check failed for mod 'Dependency'" in capsys.readouterr().err
+
+
+def test_apply_skips_optional_dependencies_by_default(mods_dir: Path, mod_zip_factory):
     mod_zip_factory(
         mods_dir,
         "Root.zip",
@@ -191,9 +221,7 @@ def test_apply_mod_options_order_follows_declared_order_with_everest(
     assert plan.mod_options_order == ["Root.zip", "Everest", "Other-custom.zip"]
 
 
-def test_apply_everest_placeholder_does_not_resolve_as_mod(
-    mods_dir: Path, monkeypatch
-):
+def test_apply_everest_placeholder_does_not_resolve_as_mod(mods_dir: Path, monkeypatch):
     def fail_if_called(*args, **kwargs):
         raise AssertionError("Everest should not be resolved as a mod")
 
@@ -228,7 +256,9 @@ def test_apply_dry_run_does_not_download_or_write_blacklist(
     requirement_path = mods_dir / "req.txt"
     requirement_path.write_text("Root\n", encoding="utf-8")
 
-    monkeypatch.setattr(mod_manager, "get_mod_info", lambda mod_name: _mod_info(mod_name))
+    monkeypatch.setattr(
+        mod_manager, "get_mod_info", lambda mod_name: _mod_info(mod_name)
+    )
 
     def fail_if_downloaded(*args, **kwargs):
         raise AssertionError("dry-run should not download")
@@ -239,10 +269,9 @@ def test_apply_dry_run_does_not_download_or_write_blacklist(
 
     assert exit_code == 0
     assert (mods_dir / "blacklist.txt").read_text(encoding="utf-8") == "Old.zip\n"
-    assert (
-        (mods_dir / "modoptionsorder.txt").read_text(encoding="utf-8")
-        == "OldOrder.zip\n"
-    )
+    assert (mods_dir / "modoptionsorder.txt").read_text(
+        encoding="utf-8"
+    ) == "OldOrder.zip\n"
 
 
 def test_apply_cli_requirement_file_rewrites_blacklist(
@@ -278,9 +307,7 @@ def test_apply_cli_optional_deps_includes_optional_dependencies(
     requirement_path = mods_dir / "req.txt"
     requirement_path.write_text("Root\n", encoding="utf-8")
 
-    exit_code = CelesteModCLI().apply(
-        ["--optional-deps", "-r", str(requirement_path)]
-    )
+    exit_code = CelesteModCLI().apply(["--optional-deps", "-r", str(requirement_path)])
 
     assert exit_code == 0
     assert (mods_dir / "blacklist.txt").read_text(encoding="utf-8") == (

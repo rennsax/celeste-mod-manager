@@ -12,6 +12,35 @@ from . import config
 
 class CelesteModCLI:
 
+    def _load_update_mod_index(self) -> dict[str, mod_db.ModInfo] | None:
+        url = f"{config.WEGFAN_API_URL}/mod/list"
+        try:
+            mod_list = mod_db.get_mod_db(url, force_update=True)
+        except Exception as refresh_error:
+            print(
+                "WARNING: failed to refresh the local mod database: "
+                f"{refresh_error}. Using the existing cached database.",
+                file=sys.stderr,
+            )
+            try:
+                mod_list = mod_db.get_cached_mod_db()
+            except Exception as cache_error:
+                print(
+                    "ERROR: failed to load the local mod database cache: "
+                    f"{cache_error}",
+                    file=sys.stderr,
+                )
+                return None
+
+        try:
+            return mod_db.index_mod_infos(mod_list)
+        except Exception as e:
+            print(
+                f"ERROR: failed to parse the local mod database: {e}",
+                file=sys.stderr,
+            )
+            return None
+
     def _install_mod(
         self, mod_name: str, no_dep: bool = False, optional_deps: bool = False
     ) -> bool:
@@ -22,6 +51,8 @@ class CelesteModCLI:
                 print(f"ERROR: mod '{mod_name}' not found in the database.")
             elif _status == EnsureModStatus.DOWNLOAD_FAILED:
                 print(f"ERROR: failed to download mod '{mod_name}'.")
+            elif _status == EnsureModStatus.CHECKSUM_FAILED:
+                pass
             elif _status == EnsureModStatus.UNEXPECTED:
                 print(
                     f"ERROR: failed to install mod '{mod_name}' due to an unexpected error."
@@ -37,9 +68,19 @@ class CelesteModCLI:
             return True
 
         print(f"Installing dependencies for {mod.name}")
-        resolved_deps, failed_deps = mod_manager.resolve_deps(
-            mod, optional=optional_deps
-        )
+        try:
+            resolved_deps, failed_deps = mod_manager.resolve_deps(
+                mod, optional=optional_deps
+            )
+        except mod_manager.ModChecksumError:
+            return False
+        except mod_manager.ModArchiveValidationError as e:
+            print(
+                f"ERROR: failed to validate a downloaded dependency for "
+                f"'{mod_name}': {e}",
+                file=sys.stderr,
+            )
+            return False
         if len(resolved_deps) != 0:
             print("Installed dependencies:")
             for dep in resolved_deps:
@@ -279,12 +320,17 @@ class CelesteModCLI:
             print(f"ERROR: failed to read update blacklist: {e}", file=sys.stderr)
             return 1
 
+        mod_info_index = self._load_update_mod_index()
+        if mod_info_index is None:
+            return 1
+
         name_width = max(len(mod.name) for mod in mods)
         status_width = max(len("[OUTDATED]"), len("[BLACKLISTED]"))
         up_to_date_count = 0
         update_available_count = 0
         skipped_count = 0
         blacklisted_count = 0
+        version_warnings: list[tuple[mod_manager.Mod, mod_db.ModInfo]] = []
 
         print("-" * 72)
         print(f"{'Status':<{status_width}}  {'Mod':<{name_width}}  Version")
@@ -299,15 +345,38 @@ class CelesteModCLI:
                 blacklisted_count += 1
                 continue
 
-            cur_mod_info = mod_db.get_mod_info(mod.name)
+            cur_mod_info = mod_info_index.get(mod.name)
             if cur_mod_info is None:
                 print(
                     f"{'[SKIP]':<{status_width}}  {mod.name:<{name_width}}  local={mod.version}  remote=unknown"
                 )
                 skipped_count += 1
                 continue
-            # TODO: other version comparison logic?
-            if cur_mod_info.version != mod.version:
+
+            valid_xxhashes = mod_manager._get_valid_mod_xxhashes(cur_mod_info)
+            if not valid_xxhashes:
+                print(
+                    f"{'[SKIP]':<{status_width}}  {mod.name:<{name_width}}  "
+                    f"local={mod.version}  remote hash unavailable"
+                )
+                skipped_count += 1
+                continue
+
+            try:
+                local_xxhash = mod_manager._calculate_xxhash64(mod.filepath)
+            except OSError as e:
+                print(
+                    f"{'[SKIP]':<{status_width}}  {mod.name:<{name_width}}  "
+                    f"local={mod.version}  local hash unavailable"
+                )
+                print(
+                    f"WARNING: failed to calculate xxHash for mod '{mod.name}': {e}",
+                    file=sys.stderr,
+                )
+                skipped_count += 1
+                continue
+
+            if local_xxhash not in valid_xxhashes:
                 print(
                     f"\033[93m{'[OUTDATED]':<{status_width}}\033[0m  {mod.name:<{name_width}}  {mod.version} -> {cur_mod_info.version}"
                 )
@@ -317,6 +386,15 @@ class CelesteModCLI:
                     f"\033[92m{'[OK]':<{status_width}}\033[0m  {mod.name:<{name_width}}  {mod.version}"
                 )
                 up_to_date_count += 1
+                if mod.version != cur_mod_info.version:
+                    version_warnings.append((mod, cur_mod_info))
+
+        for mod, cur_mod_info in version_warnings:
+            print(
+                f"\033[93m{'[WARNING]':<{status_width}}\033[0m  "
+                f"{mod.name:<{name_width}}  local={mod.version}  "
+                f"database={cur_mod_info.version}; xxHash matches, treated as up to date"
+            )
 
         print("-" * 72)
         print(
@@ -464,6 +542,8 @@ class CelesteModCLI:
         if plan.status == mod_manager.ApplyPlanStatus.DOWNLOAD_FAILED:
             failed = ", ".join(plan.failed)
             print(f"ERROR: failed to download mod(s): {failed}.", file=sys.stderr)
+            return 1
+        if plan.status == mod_manager.ApplyPlanStatus.CHECKSUM_FAILED:
             return 1
         if plan.status == mod_manager.ApplyPlanStatus.UNEXPECTED:
             print("ERROR: failed to build apply plan.", file=sys.stderr)
@@ -751,6 +831,11 @@ class CelesteModCLI:
         if len(positionals) == 0:
             print("ERROR: no mod specified to update.", file=sys.stderr)
             return 1
+
+        mod_info_index = self._load_update_mod_index()
+        if mod_info_index is None:
+            return 1
+
         exit_code = 0
         for mod_name in positionals:
             mod = self._get_installed_mod_by_name(mod_name)
@@ -762,7 +847,11 @@ class CelesteModCLI:
                 exit_code = 1
                 continue
             logger.info(f"Try to update mod '{mod_name}'...")
-            updated_mod, status = mod_manager.update_mod(mod)
+            mod_info = mod_info_index.get(mod.name)
+            if mod_info is None:
+                updated_mod, status = None, mod_manager.UpdateModStatus.UNEXPECTED
+            else:
+                updated_mod, status = mod_manager.update_mod(mod, mod_info=mod_info)
             if status == mod_manager.UpdateModStatus.ALREADY_UP_TO_DATE:
                 print(f"'{mod_name}' is already up to date.")
             elif status == mod_manager.UpdateModStatus.UPDATED:
@@ -777,6 +866,8 @@ class CelesteModCLI:
                 )
             elif status == mod_manager.UpdateModStatus.DOWNLOAD_FAILED:
                 print(f"ERROR: failed to download the update for mod '{mod_name}'.")
+                exit_code = 1
+            elif status == mod_manager.UpdateModStatus.CHECKSUM_FAILED:
                 exit_code = 1
             else:
                 print(

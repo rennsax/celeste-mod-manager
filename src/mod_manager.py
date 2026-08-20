@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum
 
+import xxhash
 import yaml
 from loguru import logger
 from rich.console import Console
@@ -18,6 +19,67 @@ from .mod_db import ModInfo, get_mod_info
 
 _DOWNLOAD_MAX_ATTEMPTS = 3
 _DOWNLOAD_PROGRESS_WIDTH = 30
+_XXHASH64_HEXDIGEST_LENGTH = 16
+_XXHASH_READ_CHUNK_SIZE = 1024 * 1024
+
+
+class ModChecksumError(Exception):
+    """Raised after a database checksum is unavailable or does not match."""
+
+    def __init__(self, mod_name: str):
+        super().__init__(f"checksum validation failed for mod '{mod_name}'")
+        self.mod_name = mod_name
+
+
+class ModArchiveValidationError(Exception):
+    """Raised when a verified download is not a safe, valid mod archive."""
+
+
+def _normalize_xxhash(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    if len(normalized) != _XXHASH64_HEXDIGEST_LENGTH:
+        return None
+    if any(character not in "0123456789abcdef" for character in normalized):
+        return None
+    return normalized
+
+
+def _get_valid_mod_xxhashes(mod_info: ModInfo) -> list[str]:
+    values = getattr(mod_info, "xxHash", None)
+    if not isinstance(values, (list, tuple)):
+        return []
+    return [
+        normalized
+        for value in values
+        if (normalized := _normalize_xxhash(value)) is not None
+    ]
+
+
+def _get_expected_download_xxhash(mod_info: ModInfo) -> str | None:
+    values = getattr(mod_info, "xxHash", None)
+    if not isinstance(values, (list, tuple)) or not values:
+        return None
+    return _normalize_xxhash(values[0])
+
+
+def _calculate_xxhash64(filepath: str) -> str:
+    checksum = xxhash.xxh64()
+    with open(filepath, "rb") as f:
+        while chunk := f.read(_XXHASH_READ_CHUNK_SIZE):
+            checksum.update(chunk)
+    return checksum.hexdigest().lower()
+
+
+def _raise_missing_expected_xxhash(mod_name: str) -> None:
+    print(
+        f"ERROR: cannot verify mod '{mod_name}' because the local database "
+        "does not contain a valid expected xxHash. Run "
+        "'celeste-mod-manager update-db' and retry.",
+        file=sys.stderr,
+    )
+    raise ModChecksumError(mod_name)
 
 
 def _format_size(num_bytes: int | float | None) -> str:
@@ -94,15 +156,18 @@ def _download_mod(mod_info: ModInfo) -> Mod | None:
         logger.critical("Invalid mod info provided for download.")
         sys.exit(1)
 
+    expected_xxhash = _get_expected_download_xxhash(mod_info)
+    if expected_xxhash is None:
+        _raise_missing_expected_xxhash(mod_info.name)
+
     url = mod_info.submissionFile.url
-    filename = f"{mod_info.name}-{mod_info.version}.zip"
-    filepath = os.path.join(config.MODS_DIR, filename)
+    requested_filename = f"{mod_info.name}-{mod_info.version}.zip"
 
     os.makedirs(config.MODS_DIR, exist_ok=True)
 
     expected_size = mod_info.submissionFile.size
     print(f"Collecting {mod_info.name}")
-    print(f"  Downloading {filename} ({_format_size(expected_size)})")
+    print(f"  Downloading {requested_filename} ({_format_size(expected_size)})")
     logger.debug(f"Downloading '{mod_info.name}' from '{url}'...")
     last_error: Exception | None = None
 
@@ -111,37 +176,68 @@ def _download_mod(mod_info: ModInfo) -> Mod | None:
 
         try:
             fd, temporary_filepath = tempfile.mkstemp(
-                prefix=f".{filename}.", suffix=".download.zip", dir=config.MODS_DIR
+                prefix=f".{requested_filename}.",
+                suffix=".download.zip",
+                dir=config.MODS_DIR,
             )
             os.close(fd)
             temporary_filename = os.path.basename(temporary_filepath)
-            with _download_progress(expected_size) as reporthook:
-                urllib.request.urlretrieve(
-                    url,
-                    temporary_filepath,
-                    reporthook=reporthook,
+            try:
+                with _download_progress(expected_size) as reporthook:
+                    urllib.request.urlretrieve(
+                        url,
+                        temporary_filepath,
+                        reporthook=reporthook,
+                    )
+            except Exception as e:
+                last_error = e
+                logger.warning(
+                    f"Download attempt {attempt}/{_DOWNLOAD_MAX_ATTEMPTS} "
+                    f"for '{requested_filename}' failed: {e}"
                 )
+                continue
+
+            actual_xxhash = _calculate_xxhash64(temporary_filepath)
+            if actual_xxhash != expected_xxhash:
+                print(
+                    f"ERROR: file integrity check failed for mod '{mod_info.name}': "
+                    f"expected xxHash '{expected_xxhash}', got '{actual_xxhash}'. Run "
+                    "'celeste-mod-manager update-db' and retry.",
+                    file=sys.stderr,
+                )
+                raise ModChecksumError(mod_info.name)
+
             mod = Mod.from_filename(temporary_filename)
             if not mod:
-                raise ValueError("downloaded file is not a valid mod archive")
+                raise ModArchiveValidationError(
+                    f"downloaded file for '{mod_info.name}' is not a valid mod archive"
+                )
+            if mod.name != mod_info.name:
+                raise ModArchiveValidationError(
+                    f"downloaded mod name mismatch: requested '{mod_info.name}', "
+                    f"archive contains '{mod.name}'"
+                )
+
+            filename = f"{mod.name}-{mod.version}.zip"
+            if "/" in filename or "\\" in filename:
+                raise ModArchiveValidationError(
+                    f"downloaded mod metadata produces an unsafe filename: '{filename}'"
+                )
+            filepath = os.path.join(config.MODS_DIR, filename)
 
             os.replace(temporary_filepath, filepath)
             mod.filepath = filepath
             print(f"  Saved {filename}")
             logger.debug(f"Downloaded '{filename}' successfully.")
-            if mod.name != mod_info.name or mod.version != mod_info.version:
-                logger.warning(
-                    f"Downloaded mod metadata mismatch for '{filename}': "
-                    f"database={mod_info.name} {mod_info.version}, "
-                    f"archive={mod.name} {mod.version}"
+            if mod.version != mod_info.version:
+                print(
+                    f"WARNING: downloaded '{mod.name}' version {mod.version}, but "
+                    f"the local database reports version {mod_info.version}. Saved "
+                    f"the archive as '{filename}'. Run "
+                    "'celeste-mod-manager update-db' to refresh the local mod database.",
+                    file=sys.stderr,
                 )
             return mod
-        except Exception as e:
-            last_error = e
-            logger.warning(
-                f"Download attempt {attempt}/{_DOWNLOAD_MAX_ATTEMPTS} "
-                f"for '{filename}' failed: {e}"
-            )
         finally:
             if temporary_filepath and os.path.exists(temporary_filepath):
                 try:
@@ -153,8 +249,8 @@ def _download_mod(mod_info: ModInfo) -> Mod | None:
                     )
 
     logger.error(
-        f"Failed to download '{filename}' after {_DOWNLOAD_MAX_ATTEMPTS} attempts: "
-        f"{last_error}"
+        f"Failed to download '{requested_filename}' after "
+        f"{_DOWNLOAD_MAX_ATTEMPTS} attempts: {last_error}"
     )
     return None
 
@@ -745,11 +841,7 @@ def analyse_mod_deps(maxdepth: int, optional: bool = False, enabled_only: bool =
 
     _warn_about_optional_dependency_cycles(graph)
     eligible_roots = (
-        {
-            mod.name
-            for mod in mods
-            if _is_mod_enabled(mod, blacklisted_filenames)
-        }
+        {mod.name for mod in mods if _is_mod_enabled(mod, blacklisted_filenames)}
         if enabled_only
         else None
     )
@@ -796,6 +888,7 @@ class EnsureModStatus(Enum):
     ALREADY_EXISTS = "already_exists"
     NOT_FOUND_IN_DB = "not_found_in_db"
     DOWNLOAD_FAILED = "download_failed"
+    CHECKSUM_FAILED = "checksum_failed"
     UNEXPECTED = "unexpected"
 
 
@@ -1019,9 +1112,7 @@ def get_update_blacklisted_mod_filenames() -> set[str]:
 
     with open(update_blacklist_path, "r", encoding="utf-8") as f:
         return {
-            entry
-            for line in f
-            if (entry := line.strip()) and not entry.startswith("#")
+            entry for line in f if (entry := line.strip()) and not entry.startswith("#")
         }
 
 
@@ -1108,14 +1199,10 @@ def _replace_filename_entry(
 
 
 def _replace_blacklist_filename(old_filename: str, new_filename: str) -> bool:
-    return _replace_filename_entry(
-        _get_blacklist_path(), old_filename, new_filename
-    )
+    return _replace_filename_entry(_get_blacklist_path(), old_filename, new_filename)
 
 
-def _replace_mod_options_order_filename(
-    old_filename: str, new_filename: str
-) -> bool:
+def _replace_mod_options_order_filename(old_filename: str, new_filename: str) -> bool:
     return _replace_filename_entry(
         _get_mod_options_order_path(), old_filename, new_filename
     )
@@ -1307,6 +1394,7 @@ class ApplyPlanStatus(Enum):
     DUPLICATE_LOCAL_MOD = "duplicate_local_mod"
     NOT_FOUND_IN_DB = "not_found_in_db"
     DOWNLOAD_FAILED = "download_failed"
+    CHECKSUM_FAILED = "checksum_failed"
     UNEXPECTED = "unexpected"
 
 
@@ -1434,8 +1522,12 @@ def build_apply_plan(
                 if ensure_status == EnsureModStatus.NOT_FOUND_IN_DB:
                     plan.missing.append(requested_name)
                     plan.status = ApplyPlanStatus.NOT_FOUND_IN_DB
-                else:
+                elif ensure_status == EnsureModStatus.CHECKSUM_FAILED:
+                    plan.status = ApplyPlanStatus.CHECKSUM_FAILED
+                elif ensure_status == EnsureModStatus.DOWNLOAD_FAILED:
                     plan.status = ApplyPlanStatus.DOWNLOAD_FAILED
+                else:
+                    plan.status = ApplyPlanStatus.UNEXPECTED
                 continue
             if ensure_status == EnsureModStatus.INSTALLED:
                 downloaded_by_name[downloaded_mod.name] = downloaded_mod
@@ -1483,6 +1575,11 @@ def build_apply_plan(
             requested_names, installed_dict
         )
         _build_apply_output_sets(requested_mod_names, optional, plan)
+        return plan
+    except ModChecksumError as e:
+        if e.mod_name not in plan.failed:
+            plan.failed.append(e.mod_name)
+        plan.status = ApplyPlanStatus.CHECKSUM_FAILED
         return plan
     except Exception as e:
         logger.error(f"Failed to build apply plan: {e}")
@@ -1577,6 +1674,8 @@ def ensure_mod(mod_name: str, root: bool = False) -> tuple[Mod | None, EnsureMod
                 logger.error(f"Failed to record root mod '{mod.name}': {e}")
                 raise e
         return mod, EnsureModStatus.INSTALLED
+    except ModChecksumError:
+        return None, EnsureModStatus.CHECKSUM_FAILED
     except Exception as e:
         logger.error(f"Failed to ensure mod '{mod_name}': {e}")
         return None, EnsureModStatus.UNEXPECTED
@@ -1586,19 +1685,28 @@ class UpdateModStatus(Enum):
     UPDATED = "updated"
     ALREADY_UP_TO_DATE = "already_up_to_date"
     DOWNLOAD_FAILED = "download_failed"
+    CHECKSUM_FAILED = "checksum_failed"
     UNEXPECTED = "unexpected"
 
 
-def update_mod(mod: Mod) -> tuple[Mod | None, UpdateModStatus]:
+def update_mod(
+    mod: Mod, mod_info: ModInfo | None = None
+) -> tuple[Mod | None, UpdateModStatus]:
     """Check if there's an update for the given mod. If there is, download and install it. Return the updated mod (or the original mod if it's already up to date) and the status."""
     root_mods = get_root_mods()
     try:
-        mod_info = get_mod_info(mod.name)
+        if mod_info is None:
+            mod_info = get_mod_info(mod.name)
         if not mod_info:
             logger.info(f"Mod '{mod.name}' not found in the database.")
             return None, UpdateModStatus.UNEXPECTED
 
-        if mod_info.version == mod.version:
+        valid_xxhashes = _get_valid_mod_xxhashes(mod_info)
+        if not valid_xxhashes:
+            _raise_missing_expected_xxhash(mod.name)
+
+        current_xxhash = _calculate_xxhash64(mod.filepath)
+        if current_xxhash in valid_xxhashes:
             return mod, UpdateModStatus.ALREADY_UP_TO_DATE
 
         updated_mod = _download_mod(mod_info)
@@ -1632,6 +1740,8 @@ def update_mod(mod: Mod) -> tuple[Mod | None, UpdateModStatus]:
                 _record_root_installed_mod(updated_mod)
                 break
         return updated_mod, UpdateModStatus.UPDATED
+    except ModChecksumError:
+        return None, UpdateModStatus.CHECKSUM_FAILED
     except Exception as e:
         logger.error(f"Failed to update mod '{mod.name}': {e}")
         return None, UpdateModStatus.UNEXPECTED
