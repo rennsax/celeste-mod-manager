@@ -2,6 +2,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from src import mod_manager
+from src.cli import CelesteModCLI
 
 
 def _mod_info(name: str, version: str):
@@ -247,3 +248,72 @@ def test_update_mod_warns_and_continues_when_order_update_fails(
         "WARNING: failed to update mod options order from "
         f"'{old_filename}' to '{new_filename}': disk full.\n"
     )
+
+
+def test_upgrade_cli_reports_already_up_to_date_as_success(
+    mods_dir: Path, mod_zip_factory, monkeypatch, capsys
+):
+    mod_zip_factory(mods_dir, "Example-1.0.0.zip", "Example", "1.0.0")
+    monkeypatch.setattr(
+        mod_manager, "get_mod_info", lambda _name: _mod_info("Example", "1.0.0")
+    )
+
+    exit_code = CelesteModCLI().upgrade(["Example"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert captured.out == "'Example' is already up to date.\n"
+    assert captured.err == ""
+
+
+def test_upgrade_cli_reports_successful_update(
+    mods_dir: Path, mod_zip_factory, monkeypatch, capsys
+):
+    _prepare_update(mods_dir, mod_zip_factory, monkeypatch)
+
+    exit_code = CelesteModCLI().upgrade(["Example"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert captured.out == (
+        "Successfully updated 'Example' from v1.0.0 to v2.0.0.\n\n"
+    )
+    assert captured.err == ""
+
+
+def test_upgrade_cli_reports_download_failure(
+    mods_dir: Path, mod_zip_factory, monkeypatch, capsys
+):
+    mod_zip_factory(mods_dir, "Example-1.0.0.zip", "Example", "1.0.0")
+    monkeypatch.setattr(
+        mod_manager,
+        "update_mod",
+        lambda _mod: (None, mod_manager.UpdateModStatus.DOWNLOAD_FAILED),
+    )
+
+    exit_code = CelesteModCLI().upgrade(["Example"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert captured.out == "ERROR: failed to download the update for mod 'Example'.\n"
+    assert captured.err == ""
+
+
+def test_upgrade_cli_handles_missing_mod_for_updated_status(
+    mods_dir: Path, mod_zip_factory, monkeypatch, capsys
+):
+    mod_zip_factory(mods_dir, "Example-1.0.0.zip", "Example", "1.0.0")
+    monkeypatch.setattr(
+        mod_manager,
+        "update_mod",
+        lambda _mod: (None, mod_manager.UpdateModStatus.UPDATED),
+    )
+
+    exit_code = CelesteModCLI().upgrade(["Example"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert captured.out == (
+        "ERROR: failed to update mod 'Example' due to an unexpected error.\n"
+    )
+    assert captured.err == ""

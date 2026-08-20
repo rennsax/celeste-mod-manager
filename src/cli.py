@@ -763,22 +763,26 @@ class CelesteModCLI:
                 continue
             logger.info(f"Try to update mod '{mod_name}'...")
             updated_mod, status = mod_manager.update_mod(mod)
-            if not updated_mod:
-                if status == mod_manager.UpdateModStatus.DOWNLOAD_FAILED:
-                    print(f"ERROR: failed to download the update for mod '{mod_name}'.")
-                    exit_code = 1
-                elif status == mod_manager.UpdateModStatus.UNEXPECTED:
+            if status == mod_manager.UpdateModStatus.ALREADY_UP_TO_DATE:
+                print(f"'{mod_name}' is already up to date.")
+            elif status == mod_manager.UpdateModStatus.UPDATED:
+                if updated_mod is None:
                     print(
                         f"ERROR: failed to update mod '{mod_name}' due to an unexpected error."
                     )
-                elif status == mod_manager.UpdateModStatus.ALREADY_UP_TO_DATE:
-                    print(f"'{mod_name}' is already up to date.")
-                exit_code = 1
-            else:
-                assert status == mod_manager.UpdateModStatus.UPDATED
+                    exit_code = 1
+                    continue
                 print(
                     f"Successfully updated '{mod_name}' from v{mod.version} to v{updated_mod.version}.\n"
                 )
+            elif status == mod_manager.UpdateModStatus.DOWNLOAD_FAILED:
+                print(f"ERROR: failed to download the update for mod '{mod_name}'.")
+                exit_code = 1
+            else:
+                print(
+                    f"ERROR: failed to update mod '{mod_name}' due to an unexpected error."
+                )
+                exit_code = 1
         return exit_code
 
 
