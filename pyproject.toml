@@ -27,6 +27,7 @@ dependencies = [
     "pyyaml",
     "loguru",
     "rapidfuzz",
+    "rich>=15.0.0",
     "vdf",
 ]
 

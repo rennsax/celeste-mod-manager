@@ -1,18 +1,23 @@
 import os
 import sys
 import tempfile
-import urllib.request
 import time
+import urllib.request
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum
+
 import yaml
 from loguru import logger
+from rich.console import Console
+from rich.progress import BarColumn, Progress, TextColumn
 
 from . import config
 from .mod import Mod
 from .mod_db import ModInfo, get_mod_info
 
 _DOWNLOAD_MAX_ATTEMPTS = 3
+_DOWNLOAD_PROGRESS_WIDTH = 30
 
 
 def _format_size(num_bytes: int | float | None) -> str:
@@ -29,40 +34,59 @@ def _format_size(num_bytes: int | float | None) -> str:
     return f"{value:.1f} GB"
 
 
-def _make_download_reporthook(expected_size: int | None = None):
+@contextmanager
+def _download_progress(expected_size: int | None = None):
     start_time = time.monotonic()
-    last_rendered_percent = -1
+    initial_total = expected_size if expected_size and expected_size > 0 else None
+    initial_size = (
+        f"0 B/{_format_size(initial_total)}"
+        if initial_total is not None
+        else "Downloaded 0 B"
+    )
+    progress = Progress(
+        TextColumn("{task.description}"),
+        BarColumn(bar_width=_DOWNLOAD_PROGRESS_WIDTH),
+        TextColumn("{task.fields[percent]}"),
+        TextColumn("{task.fields[size]}"),
+        TextColumn("{task.fields[speed]}"),
+        console=Console(file=sys.stdout, soft_wrap=True),
+        refresh_per_second=5,
+    )
+    task_id = progress.add_task(
+        " ",
+        total=initial_total,
+        percent="  0%" if initial_total is not None else "",
+        size=initial_size,
+        speed="0 B/s" if initial_total is not None else "",
+    )
 
     def reporthook(block_count: int, block_size: int, total_size: int):
-        nonlocal last_rendered_percent
-
-        downloaded = block_count * block_size
+        downloaded = max(0, block_count * block_size)
         effective_total = total_size if total_size and total_size > 0 else expected_size
         if effective_total and effective_total > 0:
             downloaded = min(downloaded, effective_total)
             percent = min(100, int(downloaded * 100 / effective_total))
-            if percent == last_rendered_percent and percent != 100:
-                return
-            last_rendered_percent = percent
-
-            filled = int(30 * percent / 100)
-            bar = "█" * filled + "░" * (30 - filled)
             elapsed = max(time.monotonic() - start_time, 0.001)
-            speed = _format_size(downloaded / elapsed) + "/s"
-            print(
-                "\r"
-                f"  {bar} {percent:3d}% "
-                f"{_format_size(downloaded)}/{_format_size(effective_total)} "
-                f"{speed}",
-                end="",
-                flush=True,
+            progress.update(
+                task_id,
+                completed=downloaded,
+                total=effective_total,
+                percent=f"{percent:3d}%",
+                size=(f"{_format_size(downloaded)}/{_format_size(effective_total)}"),
+                speed=_format_size(downloaded / elapsed) + "/s",
             )
-            if percent >= 100:
-                print()
         else:
-            print(f"\r  Downloaded {_format_size(downloaded)}", end="", flush=True)
+            progress.update(
+                task_id,
+                completed=downloaded,
+                total=None,
+                percent="",
+                size=f"Downloaded {_format_size(downloaded)}",
+                speed="",
+            )
 
-    return reporthook
+    with progress:
+        yield reporthook
 
 
 def _download_mod(mod_info: ModInfo) -> Mod | None:
@@ -91,11 +115,12 @@ def _download_mod(mod_info: ModInfo) -> Mod | None:
             )
             os.close(fd)
             temporary_filename = os.path.basename(temporary_filepath)
-            urllib.request.urlretrieve(
-                url,
-                temporary_filepath,
-                reporthook=_make_download_reporthook(expected_size),
-            )
+            with _download_progress(expected_size) as reporthook:
+                urllib.request.urlretrieve(
+                    url,
+                    temporary_filepath,
+                    reporthook=reporthook,
+                )
             mod = Mod.from_filename(temporary_filename)
             if not mod:
                 raise ValueError("downloaded file is not a valid mod archive")

@@ -1,3 +1,5 @@
+import io
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -38,23 +40,74 @@ def test_download_mod_prints_progress(
     output = capsys.readouterr().out
     assert mod is not None
     assert mod.name == "DownloadedMod"
-    assert "Collecting DownloadedMod\n" in output
-    assert "  Downloading DownloadedMod-1.0.0.zip (100 B)\n" in output
-    assert "100% 100 B/100 B" in output
-    assert "  Saved DownloadedMod-1.0.0.zip\n" in output
+    collecting = output.index("Collecting DownloadedMod\n")
+    downloading = output.index("  Downloading DownloadedMod-1.0.0.zip (100 B)\n")
+    completed = output.index("100% 100 B/100 B")
+    saved = output.index("  Saved DownloadedMod-1.0.0.zip\n")
+    assert collecting < downloading < completed < saved
     assert not list(mods_dir.glob("*.download.zip"))
 
 
+def test_download_progress_uses_ascii_bar_for_gbk_stdout(monkeypatch):
+    output_bytes = io.BytesIO()
+    stdout = io.TextIOWrapper(output_bytes, encoding="gbk")
+    monkeypatch.setattr(sys, "stdout", stdout)
+
+    with mod_manager._download_progress(expected_size=100) as reporthook:
+        reporthook(1, 50, 100)
+    stdout.flush()
+
+    output = output_bytes.getvalue().decode("gbk")
+    assert output.isascii()
+    assert "-" * 15 in output
+    assert "50% 50 B/100 B" in output
+    assert "━" not in output
+    assert "╸" not in output
+    assert "╺" not in output
+
+
+def test_download_progress_uses_unicode_bar_for_utf8_stdout(monkeypatch):
+    output_bytes = io.BytesIO()
+    stdout = io.TextIOWrapper(output_bytes, encoding="utf-8")
+    monkeypatch.setattr(sys, "stdout", stdout)
+
+    with mod_manager._download_progress(expected_size=100) as reporthook:
+        reporthook(1, 50, 100)
+    stdout.flush()
+
+    output = output_bytes.getvalue().decode("utf-8")
+    assert "━" * 15 in output
+    assert "50% 50 B/100 B" in output
+
+
+def test_download_progress_handles_unknown_size_and_caps_at_total(capsys):
+    with mod_manager._download_progress() as reporthook:
+        reporthook(1, 50, -1)
+
+    unknown_output = capsys.readouterr().out
+    assert "Downloaded 50 B" in unknown_output
+
+    with mod_manager._download_progress(expected_size=100) as reporthook:
+        reporthook(3, 50, 100)
+
+    completed_output = capsys.readouterr().out
+    assert "100% 100 B/100 B" in completed_output
+
+
 def test_download_mod_retries_then_publishes_valid_archive(
-    mods_dir: Path, mod_zip_factory, monkeypatch
+    mods_dir: Path, mod_zip_factory, monkeypatch, capsys
 ):
     attempts = 0
 
     def fake_urlretrieve(url, filepath, reporthook=None):
         nonlocal attempts
         attempts += 1
+        if reporthook:
+            reporthook(1, 50, 100)
         if attempts == 1:
             raise OSError("temporary network failure")
+        if reporthook:
+            reporthook(2, 50, 100)
         if attempts == 2:
             Path(filepath).write_bytes(b"not a zip file")
             return
@@ -70,6 +123,8 @@ def test_download_mod_retries_then_publishes_valid_archive(
     assert mod.filepath == str(mods_dir / "DownloadedMod-1.0.0.zip")
     assert mod_manager.Mod.from_filename("DownloadedMod-1.0.0.zip") is not None
     assert not list(mods_dir.glob("*.download.zip"))
+    output = capsys.readouterr().out
+    assert output.index("50% 50 B/100 B") < output.index("100% 100 B/100 B")
 
 
 def test_download_mod_failure_does_not_create_invalid_archive(
