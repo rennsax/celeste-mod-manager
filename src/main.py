@@ -31,7 +31,8 @@ Commands:
     check-updates      Check updates for installed mods. Entries in
                        Mods/updaterblacklist.txt are marked and not checked.
     update-db          Force update the local mod database from the server.
-    upgrade            Upgrade some mod(s) to the latest version.
+    upgrade            Upgrade selected mod(s), or use ALL to upgrade every
+                       outdated mod after confirmation.
 
 Experimental commands:
     apply              Apply the mod specification (by default Mods/required_mods.txt

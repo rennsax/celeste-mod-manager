@@ -18,6 +18,19 @@ def _mod_info(name: str, version: str, xx_hashes: list[str] | None = None):
     )
 
 
+def _installed_mod(
+    mods_dir: Path,
+    mod_zip_factory,
+    filename: str,
+    name: str,
+    version: str = "1.0.0",
+):
+    mod_zip_factory(mods_dir, filename, name, version)
+    mod = mod_manager.Mod.from_filename(filename)
+    assert mod is not None
+    return mod
+
+
 def _prepare_update(
     mods_dir: Path, mod_zip_factory, monkeypatch, new_version: str = "2.0.0"
 ):
@@ -533,3 +546,299 @@ def test_upgrade_cli_handles_missing_mod_for_updated_status(
         "ERROR: failed to update mod 'Example' due to an unexpected error.\n"
     )
     assert captured.err == ""
+
+
+def test_upgrade_all_must_be_the_only_argument(monkeypatch, capsys):
+    monkeypatch.setattr(
+        CelesteModCLI,
+        "_load_update_mod_index",
+        lambda _self: (_ for _ in ()).throw(AssertionError("database loaded")),
+    )
+
+    assert CelesteModCLI().upgrade(["ALL", "Example"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "ERROR: ALL must be the only argument to upgrade.\n"
+
+
+def test_upgrade_lowercase_all_is_a_regular_mod_name(monkeypatch, capsys):
+    monkeypatch.setattr(CelesteModCLI, "_load_update_mod_index", lambda _self: {})
+    monkeypatch.setattr(mod_manager, "get_installed_mods", lambda: [])
+
+    assert CelesteModCLI().upgrade(["all"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == (
+        "ERROR: mod 'all' is not installed. Cannot update a mod that is not "
+        "installed.\n"
+    )
+
+
+def test_upgrade_all_reports_when_no_mods_are_installed(monkeypatch, capsys):
+    monkeypatch.setattr(mod_manager, "get_installed_mods", lambda: [])
+    monkeypatch.setattr(
+        CelesteModCLI,
+        "_load_update_mod_index",
+        lambda _self: (_ for _ in ()).throw(AssertionError("database loaded")),
+    )
+
+    assert CelesteModCLI().upgrade(["ALL"]) == 0
+    assert capsys.readouterr().out == "No mods installed.\n"
+
+
+def test_upgrade_all_lists_and_updates_only_outdated_mods_in_name_order(
+    mods_dir: Path, mod_zip_factory, monkeypatch, capsys
+):
+    alpha = _installed_mod(
+        mods_dir, mod_zip_factory, "AlphaOutdated.zip", "AlphaOutdated"
+    )
+    blacklisted = _installed_mod(
+        mods_dir, mod_zip_factory, "Blacklisted.zip", "Blacklisted"
+    )
+    current = _installed_mod(mods_dir, mod_zip_factory, "Current.zip", "Current")
+    invalid = _installed_mod(mods_dir, mod_zip_factory, "Invalid.zip", "Invalid")
+    unknown = _installed_mod(mods_dir, mod_zip_factory, "Unknown.zip", "Unknown")
+    version_match = _installed_mod(
+        mods_dir, mod_zip_factory, "VersionMatch.zip", "VersionMatch"
+    )
+    zeta = _installed_mod(mods_dir, mod_zip_factory, "ZetaOutdated.zip", "ZetaOutdated")
+    (mods_dir / "updaterblacklist.txt").write_text(
+        "Blacklisted.zip\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        mod_manager,
+        "get_installed_mods",
+        lambda: [zeta, unknown, version_match, invalid, current, blacklisted, alpha],
+    )
+
+    queried_names = []
+
+    class TrackingIndex(dict):
+        def get(self, name, default=None):
+            queried_names.append(name)
+            return super().get(name, default)
+
+    alpha_info = _mod_info("AlphaOutdated", "2.0.0")
+    zeta_info = _mod_info("ZetaOutdated", "3.0.0")
+    mod_info_index = TrackingIndex(
+        {
+            "AlphaOutdated": alpha_info,
+            "Current": _mod_info(
+                "Current",
+                "1.0.0",
+                [mod_manager._calculate_xxhash64(current.filepath)],
+            ),
+            "Invalid": _mod_info("Invalid", "2.0.0", ["invalid"]),
+            "VersionMatch": _mod_info(
+                "VersionMatch",
+                "2.0.0",
+                [mod_manager._calculate_xxhash64(version_match.filepath)],
+            ),
+            "ZetaOutdated": zeta_info,
+        }
+    )
+    monkeypatch.setattr(
+        CelesteModCLI, "_load_update_mod_index", lambda _self: mod_info_index
+    )
+    prompts = []
+    monkeypatch.setattr(
+        "builtins.input", lambda prompt: prompts.append(prompt) or "yes"
+    )
+
+    updated = []
+
+    def fake_update_mod(mod, mod_info=None):
+        updated.append((mod, mod_info))
+        return mod, mod_manager.UpdateModStatus.ALREADY_UP_TO_DATE
+
+    monkeypatch.setattr(mod_manager, "update_mod", fake_update_mod)
+
+    assert CelesteModCLI().upgrade(["ALL"]) == 0
+
+    output = capsys.readouterr().out
+    alpha_line = "  - AlphaOutdated (v1.0.0 -> v2.0.0) [AlphaOutdated.zip]\n"
+    zeta_line = "  - ZetaOutdated (v1.0.0 -> v3.0.0) [ZetaOutdated.zip]\n"
+    assert output.startswith("The following outdated mod(s) will be upgraded:\n")
+    assert output.index(alpha_line) < output.index(zeta_line)
+    for excluded_name in (
+        "Blacklisted",
+        "Current",
+        "Invalid",
+        "Unknown",
+        "VersionMatch",
+    ):
+        assert f"  - {excluded_name} " not in output
+    assert queried_names == [
+        "AlphaOutdated",
+        "Current",
+        "Invalid",
+        "Unknown",
+        "VersionMatch",
+        "ZetaOutdated",
+    ]
+    assert updated == [(alpha, alpha_info), (zeta, zeta_info)]
+    assert prompts == ["Proceed? [y/N] "]
+
+
+def test_upgrade_all_cancellation_does_not_update_mods(
+    mods_dir: Path, mod_zip_factory, monkeypatch, capsys
+):
+    outdated = _installed_mod(mods_dir, mod_zip_factory, "Outdated.zip", "Outdated")
+    monkeypatch.setattr(mod_manager, "get_installed_mods", lambda: [outdated])
+    monkeypatch.setattr(
+        CelesteModCLI,
+        "_load_update_mod_index",
+        lambda _self: {"Outdated": _mod_info("Outdated", "2.0.0")},
+    )
+    monkeypatch.setattr("builtins.input", lambda _prompt: "n")
+    monkeypatch.setattr(
+        mod_manager,
+        "update_mod",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("updated")),
+    )
+
+    assert CelesteModCLI().upgrade(["ALL"]) == 0
+
+    assert capsys.readouterr().out == (
+        "The following outdated mod(s) will be upgraded:\n"
+        "  - Outdated (v1.0.0 -> v2.0.0) [Outdated.zip]\n"
+        "Skipped upgrading mods.\n"
+    )
+
+
+def test_upgrade_all_does_not_prompt_when_no_outdated_mods_exist(
+    mods_dir: Path, mod_zip_factory, monkeypatch, capsys
+):
+    current = _installed_mod(mods_dir, mod_zip_factory, "Current.zip", "Current")
+    monkeypatch.setattr(mod_manager, "get_installed_mods", lambda: [current])
+    monkeypatch.setattr(
+        CelesteModCLI,
+        "_load_update_mod_index",
+        lambda _self: {
+            "Current": _mod_info(
+                "Current",
+                "2.0.0",
+                [mod_manager._calculate_xxhash64(current.filepath)],
+            )
+        },
+    )
+    monkeypatch.setattr(
+        "builtins.input",
+        lambda _prompt: (_ for _ in ()).throw(AssertionError("prompted")),
+    )
+
+    assert CelesteModCLI().upgrade(["ALL"]) == 0
+    assert capsys.readouterr().out == "No outdated mods found.\n"
+
+
+def test_upgrade_all_continues_after_a_failed_update(
+    mods_dir: Path, mod_zip_factory, monkeypatch, capsys
+):
+    alpha = _installed_mod(mods_dir, mod_zip_factory, "Alpha.zip", "Alpha")
+    zeta = _installed_mod(mods_dir, mod_zip_factory, "Zeta.zip", "Zeta")
+    monkeypatch.setattr(mod_manager, "get_installed_mods", lambda: [zeta, alpha])
+    monkeypatch.setattr(
+        CelesteModCLI,
+        "_load_update_mod_index",
+        lambda _self: {
+            "Alpha": _mod_info("Alpha", "2.0.0"),
+            "Zeta": _mod_info("Zeta", "2.0.0"),
+        },
+    )
+    monkeypatch.setattr("builtins.input", lambda _prompt: "y")
+
+    updated_names = []
+
+    def fake_update_mod(mod, mod_info=None):
+        updated_names.append(mod.name)
+        if mod.name == "Alpha":
+            return None, mod_manager.UpdateModStatus.DOWNLOAD_FAILED
+        return mod, mod_manager.UpdateModStatus.ALREADY_UP_TO_DATE
+
+    monkeypatch.setattr(mod_manager, "update_mod", fake_update_mod)
+
+    assert CelesteModCLI().upgrade(["ALL"]) == 1
+
+    output = capsys.readouterr().out
+    assert updated_names == ["Alpha", "Zeta"]
+    assert output.index("failed to download the update for mod 'Alpha'") < output.index(
+        "'Zeta' is already up to date."
+    )
+
+
+def test_upgrade_all_aborts_when_update_blacklist_is_unreadable(
+    mods_dir: Path, mod_zip_factory, monkeypatch, capsys
+):
+    current = _installed_mod(mods_dir, mod_zip_factory, "Current.zip", "Current")
+    monkeypatch.setattr(mod_manager, "get_installed_mods", lambda: [current])
+    monkeypatch.setattr(
+        mod_manager,
+        "get_update_blacklisted_mod_filenames",
+        lambda: (_ for _ in ()).throw(OSError("permission denied")),
+    )
+    monkeypatch.setattr(
+        CelesteModCLI,
+        "_load_update_mod_index",
+        lambda _self: (_ for _ in ()).throw(AssertionError("database loaded")),
+    )
+    monkeypatch.setattr(
+        "builtins.input",
+        lambda _prompt: (_ for _ in ()).throw(AssertionError("prompted")),
+    )
+
+    assert CelesteModCLI().upgrade(["ALL"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "ERROR: failed to read update blacklist: permission denied\n"
+
+
+def test_upgrade_all_aborts_when_mod_database_cannot_be_loaded(
+    mods_dir: Path, mod_zip_factory, monkeypatch, capsys
+):
+    current = _installed_mod(mods_dir, mod_zip_factory, "Current.zip", "Current")
+    monkeypatch.setattr(mod_manager, "get_installed_mods", lambda: [current])
+    monkeypatch.setattr(CelesteModCLI, "_load_update_mod_index", lambda _self: None)
+    monkeypatch.setattr(
+        "builtins.input",
+        lambda _prompt: (_ for _ in ()).throw(AssertionError("prompted")),
+    )
+
+    assert CelesteModCLI().upgrade(["ALL"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+
+
+def test_upgrade_all_skips_mod_when_local_hash_cannot_be_read(
+    mods_dir: Path, mod_zip_factory, monkeypatch, capsys
+):
+    unreadable = _installed_mod(
+        mods_dir, mod_zip_factory, "Unreadable.zip", "Unreadable"
+    )
+    monkeypatch.setattr(mod_manager, "get_installed_mods", lambda: [unreadable])
+    monkeypatch.setattr(
+        CelesteModCLI,
+        "_load_update_mod_index",
+        lambda _self: {"Unreadable": _mod_info("Unreadable", "2.0.0")},
+    )
+    monkeypatch.setattr(
+        mod_manager,
+        "_calculate_xxhash64",
+        lambda _path: (_ for _ in ()).throw(OSError("disk error")),
+    )
+    monkeypatch.setattr(
+        "builtins.input",
+        lambda _prompt: (_ for _ in ()).throw(AssertionError("prompted")),
+    )
+
+    assert CelesteModCLI().upgrade(["ALL"]) == 0
+
+    captured = capsys.readouterr()
+    assert captured.out == "No outdated mods found.\n"
+    assert captured.err == (
+        "WARNING: failed to calculate xxHash for mod 'Unreadable': disk error\n"
+    )

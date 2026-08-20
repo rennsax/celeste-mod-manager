@@ -1,13 +1,33 @@
-import sys
-import os
-from typing import Sequence
 import optparse
+import os
+import sys
 import textwrap
+from dataclasses import dataclass
+from enum import Enum
+from typing import Sequence
+
 from loguru import logger
 
 from . import mod_manager, mod_db
 from .mod_manager import EnsureModStatus
 from . import config
+
+
+class _UpdateCheckStatus(Enum):
+    BLACKLISTED = "blacklisted"
+    UNKNOWN = "unknown"
+    REMOTE_HASH_UNAVAILABLE = "remote_hash_unavailable"
+    LOCAL_HASH_UNAVAILABLE = "local_hash_unavailable"
+    OUTDATED = "outdated"
+    UP_TO_DATE = "up_to_date"
+
+
+@dataclass(frozen=True)
+class _UpdateCheckEntry:
+    mod: mod_manager.Mod
+    status: _UpdateCheckStatus
+    mod_info: mod_db.ModInfo | None = None
+    error: OSError | None = None
 
 
 class CelesteModCLI:
@@ -40,6 +60,69 @@ class CelesteModCLI:
                 file=sys.stderr,
             )
             return None
+
+    def _collect_update_check_entries(self) -> list[_UpdateCheckEntry] | None:
+        mods = sorted(
+            mod_manager.get_installed_mods(), key=lambda mod: mod.name.lower()
+        )
+        if not mods:
+            return []
+
+        try:
+            update_blacklisted_filenames = (
+                mod_manager.get_update_blacklisted_mod_filenames()
+            )
+        except OSError as e:
+            print(f"ERROR: failed to read update blacklist: {e}", file=sys.stderr)
+            return None
+
+        mod_info_index = self._load_update_mod_index()
+        if mod_info_index is None:
+            return None
+
+        entries: list[_UpdateCheckEntry] = []
+        for mod in mods:
+            if mod.get_filename() in update_blacklisted_filenames:
+                entries.append(_UpdateCheckEntry(mod, _UpdateCheckStatus.BLACKLISTED))
+                continue
+
+            cur_mod_info = mod_info_index.get(mod.name)
+            if cur_mod_info is None:
+                entries.append(_UpdateCheckEntry(mod, _UpdateCheckStatus.UNKNOWN))
+                continue
+
+            valid_xxhashes = mod_manager._get_valid_mod_xxhashes(cur_mod_info)
+            if not valid_xxhashes:
+                entries.append(
+                    _UpdateCheckEntry(
+                        mod,
+                        _UpdateCheckStatus.REMOTE_HASH_UNAVAILABLE,
+                        cur_mod_info,
+                    )
+                )
+                continue
+
+            try:
+                local_xxhash = mod_manager._calculate_xxhash64(mod.filepath)
+            except OSError as e:
+                entries.append(
+                    _UpdateCheckEntry(
+                        mod,
+                        _UpdateCheckStatus.LOCAL_HASH_UNAVAILABLE,
+                        cur_mod_info,
+                        e,
+                    )
+                )
+                continue
+
+            status = (
+                _UpdateCheckStatus.OUTDATED
+                if local_xxhash not in valid_xxhashes
+                else _UpdateCheckStatus.UP_TO_DATE
+            )
+            entries.append(_UpdateCheckEntry(mod, status, cur_mod_info))
+
+        return entries
 
     def _install_mod(
         self, mod_name: str, no_dep: bool = False, optional_deps: bool = False
@@ -305,26 +388,14 @@ class CelesteModCLI:
 
     def check_updates(self, args: list[str]) -> int:
         """Check for updates for all installed mods."""
-        mods = sorted(
-            mod_manager.get_installed_mods(), key=lambda mod: mod.name.lower()
-        )
-        if not mods:
+        entries = self._collect_update_check_entries()
+        if entries is None:
+            return 1
+        if not entries:
             print("No mods installed.")
             return 0
 
-        try:
-            update_blacklisted_filenames = (
-                mod_manager.get_update_blacklisted_mod_filenames()
-            )
-        except OSError as e:
-            print(f"ERROR: failed to read update blacklist: {e}", file=sys.stderr)
-            return 1
-
-        mod_info_index = self._load_update_mod_index()
-        if mod_info_index is None:
-            return 1
-
-        name_width = max(len(mod.name) for mod in mods)
+        name_width = max(len(entry.mod.name) for entry in entries)
         status_width = max(len("[OUTDATED]"), len("[BLACKLISTED]"))
         up_to_date_count = 0
         update_available_count = 0
@@ -336,8 +407,9 @@ class CelesteModCLI:
         print(f"{'Status':<{status_width}}  {'Mod':<{name_width}}  Version")
         print("-" * 72)
 
-        for mod in mods:
-            if mod.get_filename() in update_blacklisted_filenames:
+        for entry in entries:
+            mod = entry.mod
+            if entry.status == _UpdateCheckStatus.BLACKLISTED:
                 print(
                     f"{'[BLACKLISTED]':<{status_width}}  {mod.name:<{name_width}}  "
                     f"local={mod.version}  remote=not checked"
@@ -345,16 +417,14 @@ class CelesteModCLI:
                 blacklisted_count += 1
                 continue
 
-            cur_mod_info = mod_info_index.get(mod.name)
-            if cur_mod_info is None:
+            if entry.status == _UpdateCheckStatus.UNKNOWN:
                 print(
                     f"{'[SKIP]':<{status_width}}  {mod.name:<{name_width}}  local={mod.version}  remote=unknown"
                 )
                 skipped_count += 1
                 continue
 
-            valid_xxhashes = mod_manager._get_valid_mod_xxhashes(cur_mod_info)
-            if not valid_xxhashes:
+            if entry.status == _UpdateCheckStatus.REMOTE_HASH_UNAVAILABLE:
                 print(
                     f"{'[SKIP]':<{status_width}}  {mod.name:<{name_width}}  "
                     f"local={mod.version}  remote hash unavailable"
@@ -362,26 +432,27 @@ class CelesteModCLI:
                 skipped_count += 1
                 continue
 
-            try:
-                local_xxhash = mod_manager._calculate_xxhash64(mod.filepath)
-            except OSError as e:
+            if entry.status == _UpdateCheckStatus.LOCAL_HASH_UNAVAILABLE:
                 print(
                     f"{'[SKIP]':<{status_width}}  {mod.name:<{name_width}}  "
                     f"local={mod.version}  local hash unavailable"
                 )
                 print(
-                    f"WARNING: failed to calculate xxHash for mod '{mod.name}': {e}",
+                    f"WARNING: failed to calculate xxHash for mod '{mod.name}': "
+                    f"{entry.error}",
                     file=sys.stderr,
                 )
                 skipped_count += 1
                 continue
 
-            if local_xxhash not in valid_xxhashes:
+            cur_mod_info = entry.mod_info
+            assert cur_mod_info is not None
+            if entry.status == _UpdateCheckStatus.OUTDATED:
                 print(
                     f"\033[93m{'[OUTDATED]':<{status_width}}\033[0m  {mod.name:<{name_width}}  {mod.version} -> {cur_mod_info.version}"
                 )
                 update_available_count += 1
-            else:
+            elif entry.status == _UpdateCheckStatus.UP_TO_DATE:
                 print(
                     f"\033[92m{'[OK]':<{status_width}}\033[0m  {mod.name:<{name_width}}  {mod.version}"
                 )
@@ -398,7 +469,7 @@ class CelesteModCLI:
 
         print("-" * 72)
         print(
-            f"Summary: total={len(mods)}, outdated={update_available_count}, "
+            f"Summary: total={len(entries)}, outdated={update_available_count}, "
             f"up-to-date={up_to_date_count}, skipped={skipped_count}, "
             f"blacklisted={blacklisted_count}"
         )
@@ -822,15 +893,106 @@ class CelesteModCLI:
         """Enable mod(s) by removing them and disabled dependencies from blacklist.txt."""
         return self._toggle_mods(args, action="enable", prog_name=prog_name)
 
+    def _upgrade_mod(
+        self,
+        mod: mod_manager.Mod,
+        mod_info: mod_db.ModInfo | None,
+        display_name: str | None = None,
+    ) -> int:
+        mod_name = display_name if display_name is not None else mod.name
+        logger.info(f"Try to update mod '{mod_name}'...")
+        if mod_info is None:
+            updated_mod, status = None, mod_manager.UpdateModStatus.UNEXPECTED
+        else:
+            updated_mod, status = mod_manager.update_mod(mod, mod_info=mod_info)
+
+        if status == mod_manager.UpdateModStatus.ALREADY_UP_TO_DATE:
+            print(f"'{mod_name}' is already up to date.")
+            return 0
+        if status == mod_manager.UpdateModStatus.UPDATED:
+            if updated_mod is None:
+                print(
+                    f"ERROR: failed to update mod '{mod_name}' due to an unexpected error."
+                )
+                return 1
+            print(
+                f"Successfully updated '{mod_name}' from v{mod.version} to "
+                f"v{updated_mod.version}.\n"
+            )
+            return 0
+        if status == mod_manager.UpdateModStatus.DOWNLOAD_FAILED:
+            print(f"ERROR: failed to download the update for mod '{mod_name}'.")
+            return 1
+        if status == mod_manager.UpdateModStatus.CHECKSUM_FAILED:
+            return 1
+
+        print(f"ERROR: failed to update mod '{mod_name}' due to an unexpected error.")
+        return 1
+
+    def _upgrade_all(self) -> int:
+        entries = self._collect_update_check_entries()
+        if entries is None:
+            return 1
+        if not entries:
+            print("No mods installed.")
+            return 0
+
+        for entry in entries:
+            if entry.status == _UpdateCheckStatus.LOCAL_HASH_UNAVAILABLE:
+                print(
+                    f"WARNING: failed to calculate xxHash for mod "
+                    f"'{entry.mod.name}': {entry.error}",
+                    file=sys.stderr,
+                )
+
+        outdated_entries = [
+            entry for entry in entries if entry.status == _UpdateCheckStatus.OUTDATED
+        ]
+        if not outdated_entries:
+            print("No outdated mods found.")
+            return 0
+
+        print("The following outdated mod(s) will be upgraded:")
+        for entry in outdated_entries:
+            mod_info = entry.mod_info
+            assert mod_info is not None
+            print(
+                f"  - {entry.mod.name} "
+                f"(v{entry.mod.version} -> v{mod_info.version}) "
+                f"[{entry.mod.get_filename()}]"
+            )
+
+        answer = input("Proceed? [y/N] ").strip().lower()
+        if answer not in ("y", "yes"):
+            print("Skipped upgrading mods.")
+            return 0
+
+        exit_code = 0
+        for entry in outdated_entries:
+            exit_code = max(
+                exit_code,
+                self._upgrade_mod(entry.mod, entry.mod_info),
+            )
+        return exit_code
+
     def upgrade(
         self, args: list[str], prog_name: str = "celeste-mod-manager upgrade"
     ) -> int:
         """Update specified mod(s)"""
-        parser = optparse.OptionParser(prog=prog_name)
-        options, positionals = parser.parse_args(args)
+        parser = optparse.OptionParser(
+            prog=prog_name,
+            usage=f"{prog_name} MOD... | {prog_name} ALL",
+            description="Upgrade installed mods. ALL must be the only argument.",
+        )
+        _, positionals = parser.parse_args(args)
         if len(positionals) == 0:
             print("ERROR: no mod specified to update.", file=sys.stderr)
             return 1
+        if "ALL" in positionals and positionals != ["ALL"]:
+            print("ERROR: ALL must be the only argument to upgrade.", file=sys.stderr)
+            return 1
+        if positionals == ["ALL"]:
+            return self._upgrade_all()
 
         mod_info_index = self._load_update_mod_index()
         if mod_info_index is None:
@@ -846,34 +1008,14 @@ class CelesteModCLI:
                 )
                 exit_code = 1
                 continue
-            logger.info(f"Try to update mod '{mod_name}'...")
-            mod_info = mod_info_index.get(mod.name)
-            if mod_info is None:
-                updated_mod, status = None, mod_manager.UpdateModStatus.UNEXPECTED
-            else:
-                updated_mod, status = mod_manager.update_mod(mod, mod_info=mod_info)
-            if status == mod_manager.UpdateModStatus.ALREADY_UP_TO_DATE:
-                print(f"'{mod_name}' is already up to date.")
-            elif status == mod_manager.UpdateModStatus.UPDATED:
-                if updated_mod is None:
-                    print(
-                        f"ERROR: failed to update mod '{mod_name}' due to an unexpected error."
-                    )
-                    exit_code = 1
-                    continue
-                print(
-                    f"Successfully updated '{mod_name}' from v{mod.version} to v{updated_mod.version}.\n"
-                )
-            elif status == mod_manager.UpdateModStatus.DOWNLOAD_FAILED:
-                print(f"ERROR: failed to download the update for mod '{mod_name}'.")
-                exit_code = 1
-            elif status == mod_manager.UpdateModStatus.CHECKSUM_FAILED:
-                exit_code = 1
-            else:
-                print(
-                    f"ERROR: failed to update mod '{mod_name}' due to an unexpected error."
-                )
-                exit_code = 1
+            exit_code = max(
+                exit_code,
+                self._upgrade_mod(
+                    mod,
+                    mod_info_index.get(mod.name),
+                    display_name=mod_name,
+                ),
+            )
         return exit_code
 
 
