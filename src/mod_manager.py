@@ -1073,15 +1073,14 @@ def _replace_mod_options_order_entries(entries: list[str]) -> None:
         f.write("\n".join(new_lines).rstrip() + "\n")
 
 
-def _replace_mod_options_order_filename(
-    old_filename: str, new_filename: str
+def _replace_filename_entry(
+    filepath: str, old_filename: str, new_filename: str
 ) -> bool:
-    """Replace existing archive entries without rewriting a user's order file."""
-    mod_options_order_path = _get_mod_options_order_path()
-    if not os.path.exists(mod_options_order_path):
+    """Replace exact archive entries without rewriting the surrounding file."""
+    if not os.path.exists(filepath):
         return False
 
-    with open(mod_options_order_path, "r", encoding="utf-8", newline="") as f:
+    with open(filepath, "r", encoding="utf-8", newline="") as f:
         lines = f.read().splitlines(keepends=True)
 
     replaced = False
@@ -1103,9 +1102,23 @@ def _replace_mod_options_order_filename(
     if not replaced:
         return False
 
-    with open(mod_options_order_path, "w", encoding="utf-8", newline="") as f:
+    with open(filepath, "w", encoding="utf-8", newline="") as f:
         f.write("".join(new_lines))
     return True
+
+
+def _replace_blacklist_filename(old_filename: str, new_filename: str) -> bool:
+    return _replace_filename_entry(
+        _get_blacklist_path(), old_filename, new_filename
+    )
+
+
+def _replace_mod_options_order_filename(
+    old_filename: str, new_filename: str
+) -> bool:
+    return _replace_filename_entry(
+        _get_mod_options_order_path(), old_filename, new_filename
+    )
 
 
 def _is_mod_enabled(mod: Mod, blacklisted_filenames: set[str]) -> bool:
@@ -1592,6 +1605,16 @@ def update_mod(mod: Mod) -> tuple[Mod | None, UpdateModStatus]:
         if updated_mod is None:
             return None, UpdateModStatus.DOWNLOAD_FAILED
         if updated_mod.get_filename() != mod.get_filename():
+            try:
+                _replace_blacklist_filename(
+                    mod.get_filename(), updated_mod.get_filename()
+                )
+            except Exception as e:
+                print(
+                    f"WARNING: failed to update blacklist from "
+                    f"'{mod.get_filename()}' to '{updated_mod.get_filename()}': {e}.",
+                    file=sys.stderr,
+                )
             try:
                 _replace_mod_options_order_filename(
                     mod.get_filename(), updated_mod.get_filename()
