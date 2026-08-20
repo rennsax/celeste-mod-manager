@@ -433,8 +433,15 @@ def _print_dependency_tree(
     optional_dependents = optional_dependents or {}
 
     def print_tree(
-        node, prefix="", is_last=True, is_root=False, is_opt=False, current_depth=1
+        node,
+        prefix="",
+        is_last=True,
+        is_root=False,
+        is_opt=False,
+        current_depth=1,
+        path=frozenset(),
     ):
+        is_cycle = not is_root and node in path
         if is_root:
             display_node = f"{node} ({installed_dict[node].version})"
             if show_disabled and not _is_mod_enabled(
@@ -466,12 +473,15 @@ def _print_dependency_tree(
                     display_node = f"{display_node} \033[91m[DISABLED]\033[0m"
             if is_opt:
                 display_node = f"{display_node} (Optional)"
+            if is_cycle:
+                display_node = f"{display_node} [CYCLE]"
             print(f"{prefix}{connector}{display_node}")
             new_prefix = prefix + ("    " if is_last else "│   ")
 
-        if current_depth >= maxdepth:
+        if is_cycle or current_depth >= maxdepth:
             return
 
+        next_path = path | {node}
         children = sorted(graph.get(node, []), key=lambda x: x[0].lower())
         for i, (child, child_is_opt) in enumerate(children):
             is_last_child = i == len(children) - 1
@@ -482,6 +492,7 @@ def _print_dependency_tree(
                 is_root=False,
                 is_opt=child_is_opt,
                 current_depth=current_depth + 1,
+                path=next_path,
             )
 
     for i in range(len(roots)):
@@ -490,14 +501,16 @@ def _print_dependency_tree(
             print()
 
 
-def _has_dependency_cycle(graph: dict[str, list[tuple[str, bool]]]) -> bool:
+def _has_dependency_cycle(
+    graph: dict[str, list[tuple[str, bool]]], *, include_optional: bool = True
+) -> bool:
     visited = {}
 
     def has_cycle(node, path):
         visited[node] = 1
         path.append(node)
         for neighbor, is_opt in graph.get(node, []):
-            if neighbor.endswith(" (Missing)"):
+            if neighbor not in graph or (is_opt and not include_optional):
                 continue
             if visited.get(neighbor) == 1:
                 cycle_start = path.index(neighbor)
@@ -518,6 +531,108 @@ def _has_dependency_cycle(graph: dict[str, list[tuple[str, bool]]]) -> bool:
     return False
 
 
+def _get_strongly_connected_components(
+    graph: dict[str, list[tuple[str, bool]]],
+) -> list[list[str]]:
+    index = 0
+    indices: dict[str, int] = {}
+    lowlinks: dict[str, int] = {}
+    stack: list[str] = []
+    on_stack: set[str] = set()
+    components: list[list[str]] = []
+
+    def connect(node: str):
+        nonlocal index
+        indices[node] = index
+        lowlinks[node] = index
+        index += 1
+        stack.append(node)
+        on_stack.add(node)
+
+        children = sorted(graph.get(node, []), key=lambda item: item[0].lower())
+        for neighbor, _ in children:
+            if neighbor not in graph:
+                continue
+            if neighbor not in indices:
+                connect(neighbor)
+                lowlinks[node] = min(lowlinks[node], lowlinks[neighbor])
+            elif neighbor in on_stack:
+                lowlinks[node] = min(lowlinks[node], indices[neighbor])
+
+        if lowlinks[node] != indices[node]:
+            return
+
+        component = []
+        while True:
+            member = stack.pop()
+            on_stack.remove(member)
+            component.append(member)
+            if member == node:
+                break
+        components.append(sorted(component, key=str.lower))
+
+    for node in sorted(graph, key=str.lower):
+        if node not in indices:
+            connect(node)
+
+    return sorted(components, key=lambda component: component[0].lower())
+
+
+def _is_cyclic_component(
+    component: list[str], graph: dict[str, list[tuple[str, bool]]]
+) -> bool:
+    if len(component) > 1:
+        return True
+    node = component[0]
+    return any(neighbor == node for neighbor, _ in graph.get(node, []))
+
+
+def _get_dependency_graph_roots(
+    graph: dict[str, list[tuple[str, bool]]],
+    root_edges: set[tuple[str, str]],
+    eligible_roots: set[str] | None = None,
+) -> list[str]:
+    components = _get_strongly_connected_components(graph)
+    component_by_node = {
+        node: component_index
+        for component_index, component in enumerate(components)
+        for node in component
+    }
+    component_in_degree = [0] * len(components)
+
+    for source, target in root_edges:
+        source_component = component_by_node[source]
+        target_component = component_by_node[target]
+        if source_component != target_component:
+            component_in_degree[target_component] += 1
+
+    eligible_roots = eligible_roots if eligible_roots is not None else set(graph)
+    roots = []
+    for component_index, component in enumerate(components):
+        if component_in_degree[component_index] != 0:
+            continue
+        candidates = [node for node in component if node in eligible_roots]
+        if candidates:
+            roots.append(min(candidates, key=str.lower))
+
+    return sorted(roots, key=str.lower)
+
+
+def _warn_about_optional_dependency_cycles(
+    graph: dict[str, list[tuple[str, bool]]],
+) -> None:
+    for component in _get_strongly_connected_components(graph):
+        if not _is_cyclic_component(component, graph):
+            continue
+        members = ", ".join(component)
+        print(
+            "WARNING: optional dependency cycle detected among: "
+            f"{members}. Continuing because Everest permits cycles involving "
+            "optional dependencies.",
+            file=sys.stderr,
+        )
+
+
 def _analyse_enabled_mod_deps(maxdepth: int, optional: bool = False):
     mods = get_installed_mods()
     if not mods:
@@ -532,7 +647,7 @@ def _analyse_enabled_mod_deps(maxdepth: int, optional: bool = False):
 
     installed_dict = {mod.name: mod for mod in enabled_mods}
     graph = {}
-    in_degree = {mod.name: 0 for mod in enabled_mods}
+    root_edges: set[tuple[str, str]] = set()
 
     for mod in enabled_mods:
         graph[mod.name] = []
@@ -554,14 +669,14 @@ def _analyse_enabled_mod_deps(maxdepth: int, optional: bool = False):
 
             is_opt = dep_name not in required_names
             graph[mod.name].append((dep_name, is_opt))
-            in_degree[dep_name] = in_degree.get(dep_name, 0) + 1
+            root_edges.add((mod.name, dep_name))
 
-    if _has_dependency_cycle(graph):
+    if _has_dependency_cycle(graph, include_optional=False):
         logger.critical("Cycle detected in the dependency graph.")
         sys.exit(1)
 
-    roots = [node for node in graph if in_degree.get(node) == 0]
-    roots.sort(key=lambda x: x.lower())
+    _warn_about_optional_dependency_cycles(graph)
+    roots = _get_dependency_graph_roots(graph, root_edges)
     if not roots:
         print("No mods installed.")
         return
@@ -587,7 +702,7 @@ def analyse_mod_deps(maxdepth: int, optional: bool = False, enabled_only: bool =
     blacklisted_filenames = get_blacklisted_mod_filenames()
     installed_dict = {mod.name: mod for mod in mods}
     graph = {}
-    in_degree = {mod.name: 0 for mod in mods}
+    root_edges: set[tuple[str, str]] = set()
     optional_dependents: dict[str, set[str]] = {mod.name: set() for mod in mods}
 
     for mod in mods:
@@ -620,27 +735,28 @@ def analyse_mod_deps(maxdepth: int, optional: bool = False, enabled_only: bool =
                 if (not is_opt or optional) and (
                     not enabled_only or _is_mod_enabled(mod, blacklisted_filenames)
                 ):
-                    in_degree[dep_name] = in_degree.get(dep_name, 0) + 1
+                    root_edges.add((mod.name, dep_name))
             else:
                 graph[mod.name].append((f"{dep_name} (Missing)", is_opt))
 
-    # Check whether the graph has cycles
-    if _has_dependency_cycle(graph):
+    if _has_dependency_cycle(graph, include_optional=False):
         logger.critical("Cycle detected in the dependency graph.")
         sys.exit(1)
 
-    # Find the sources in the DAG
-    roots = [node for node in graph if in_degree.get(node) == 0]
-    if enabled_only:
-        roots = [
-            root
-            for root in roots
-            if _is_mod_enabled(installed_dict[root], blacklisted_filenames)
-        ]
-        if not roots:
-            print("No mods installed.")
-            return
-    roots.sort(key=lambda x: x.lower())
+    _warn_about_optional_dependency_cycles(graph)
+    eligible_roots = (
+        {
+            mod.name
+            for mod in mods
+            if _is_mod_enabled(mod, blacklisted_filenames)
+        }
+        if enabled_only
+        else None
+    )
+    roots = _get_dependency_graph_roots(graph, root_edges, eligible_roots)
+    if not roots:
+        print("No mods installed.")
+        return
 
     recorded_root_names = {mod.name for mod in get_root_mods()}
     orphan_roots = (
