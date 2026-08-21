@@ -2,56 +2,12 @@ from pathlib import Path
 
 import pytest
 
-from src import config, mod_manager
+from src import mod_manager
 from src.cli import CelesteModCLI
 
 
 def _dep(name: str, version: str = "1.0.0") -> dict[str, str]:
     return {"Name": name, "Version": version}
-
-
-def build_complex_mod_library(mods_dir: Path, mod_zip_factory, installed_mods_writer):
-    mod_zip_factory(
-        mods_dir,
-        "AdventurePack.zip",
-        "AdventurePack",
-        deps=[_dep("CoreLib"), _dep("MapPack"), _dep("MissingDependency")],
-        optional_deps=[_dep("OptionalSkin")],
-    )
-    mod_zip_factory(
-        mods_dir,
-        "MapPack.zip",
-        "MapPack",
-        deps=[_dep("CoreLib"), _dep("SharedAssets")],
-    )
-    mod_zip_factory(
-        mods_dir,
-        "CoreLib.zip",
-        "CoreLib",
-        deps=[_dep("SharedAssets")],
-    )
-    mod_zip_factory(mods_dir, "SharedAssets.zip", "SharedAssets")
-    mod_zip_factory(mods_dir, "OptionalSkin.zip", "OptionalSkin")
-    mod_zip_factory(mods_dir, "SoloChallenge.zip", "SoloChallenge")
-    installed_mods_writer(
-        mods_dir,
-        [
-            {
-                "name": "AdventurePack",
-                "version": "1.0.0",
-                "filename": "AdventurePack.zip",
-            }
-        ],
-    )
-
-
-def assert_contains_all(output: str, fragments: list[str]):
-    for fragment in fragments:
-        assert fragment in output
-
-
-def use_legacy_list_tree(monkeypatch):
-    monkeypatch.setattr(config, "_ENABLE_EXPERIMENTAL_APPLY", False)
 
 
 def build_three_mod_optional_cycle(mods_dir: Path, mod_zip_factory):
@@ -75,108 +31,21 @@ def build_three_mod_optional_cycle(mods_dir: Path, mod_zip_factory):
     )
 
 
-def test_list_tree_prints_required_dependency_tree(
-    mods_dir: Path, mod_zip_factory, installed_mods_writer, monkeypatch, capsys
-):
-    use_legacy_list_tree(monkeypatch)
-    build_complex_mod_library(mods_dir, mod_zip_factory, installed_mods_writer)
-
-    mod_manager.analyse_mod_deps(maxdepth=4)
-
-    output = capsys.readouterr().out
-    assert_contains_all(
-        output,
-        [
-            "AdventurePack (1.0.0)\n"
-            "├── CoreLib (1.0.0)\n"
-            "│   └── SharedAssets (1.0.0)\n",
-            "├── MapPack (1.0.0)\n"
-            "│   ├── CoreLib (1.0.0)\n"
-            "│   │   └── SharedAssets (1.0.0)\n"
-            "│   └── SharedAssets (1.0.0)\n",
-            "└── \x1b[91mMissingDependency (Missing)\x1b[0m\n",
-            "OptionalSkin (1.0.0) (optionally depended by AdventurePack)",
-            "SoloChallenge (1.0.0) \x1b[1;33m[ORPHAN]\x1b[0m",
-        ],
-    )
-    assert "OptionalSkin (1.0.0) \x1b[1;33m[ORPHAN]\x1b[0m" not in output
-
-
-def test_list_tree_includes_optional_dependencies_when_requested(
-    mods_dir: Path, mod_zip_factory, installed_mods_writer, monkeypatch, capsys
-):
-    use_legacy_list_tree(monkeypatch)
-    build_complex_mod_library(mods_dir, mod_zip_factory, installed_mods_writer)
-
-    mod_manager.analyse_mod_deps(maxdepth=2, optional=True)
-
-    output = capsys.readouterr().out
-    assert_contains_all(
-        output,
-        [
-            "AdventurePack (1.0.0)\n"
-            "├── CoreLib (1.0.0)\n"
-            "├── MapPack (1.0.0)\n"
-            "├── \x1b[91mMissingDependency (Missing)\x1b[0m\n"
-            "└── OptionalSkin (1.0.0) (Optional)\n",
-            "SoloChallenge (1.0.0) \x1b[1;33m[ORPHAN]\x1b[0m",
-        ],
-    )
-    assert "OptionalSkin (1.0.0) \x1b[1;33m[ORPHAN]\x1b[0m" not in output
-    assert "OptionalSkin (1.0.0) (optionally depended by AdventurePack)" not in output
-
-
-def test_list_tree_marks_disabled_mods(
-    mods_dir: Path, mod_zip_factory, installed_mods_writer, monkeypatch, capsys
-):
-    use_legacy_list_tree(monkeypatch)
-    build_complex_mod_library(mods_dir, mod_zip_factory, installed_mods_writer)
-    (mods_dir / "blacklist.txt").write_text(
-        "AdventurePack.zip\nCoreLib.zip\n", encoding="utf-8"
-    )
-
-    mod_manager.analyse_mod_deps(maxdepth=2)
-
-    output = capsys.readouterr().out
-    assert_contains_all(
-        output,
-        [
-            "AdventurePack (1.0.0) \x1b[91m[DISABLED]\x1b[0m\n",
-            "├── CoreLib (1.0.0) \x1b[91m[DISABLED]\x1b[0m\n",
-        ],
-    )
-    assert "MapPack (1.0.0) \x1b[91m[DISABLED]\x1b[0m" not in output
-
-
-def test_list_tree_enabled_only_filters_disabled_roots_but_keeps_dependencies(
-    mods_dir: Path, mod_zip_factory, installed_mods_writer, monkeypatch, capsys
-):
-    use_legacy_list_tree(monkeypatch)
-    build_complex_mod_library(mods_dir, mod_zip_factory, installed_mods_writer)
-    (mods_dir / "blacklist.txt").write_text(
-        "AdventurePack.zip\nCoreLib.zip\n", encoding="utf-8"
-    )
-
-    mod_manager.analyse_mod_deps(maxdepth=2, enabled_only=True)
-
-    output = capsys.readouterr().out
-    assert_contains_all(
-        output,
-        [
-            "MapPack (1.0.0)",
-            "├── CoreLib (1.0.0) \x1b[91m[DISABLED]\x1b[0m\n",
-        ],
-    )
-    assert "AdventurePack" not in output
-
-
 def test_list_tree_prints_no_mods_when_empty(mods_dir: Path, capsys):
     mod_manager.analyse_mod_deps(maxdepth=2)
 
     assert capsys.readouterr().out == "No mods installed.\n"
 
 
-def test_experimental_list_tree_only_prints_enabled_mod_tree(
+def test_list_tree_rejects_removed_enabled_option(capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        CelesteModCLI().list_tree(["--enabled"])
+
+    assert exc_info.value.code == 2
+    assert "no such option: --enabled" in capsys.readouterr().err
+
+
+def test_list_tree_only_prints_enabled_mod_tree(
     mods_dir: Path, mod_zip_factory, capsys
 ):
     mod_zip_factory(
@@ -215,7 +84,7 @@ def test_experimental_list_tree_only_prints_enabled_mod_tree(
     assert "optionally depended by" not in output
 
 
-def test_experimental_list_tree_optional_deps_are_controlled_by_option(
+def test_list_tree_optional_deps_are_controlled_by_option(
     mods_dir: Path, mod_zip_factory, capsys
 ):
     mod_zip_factory(
@@ -240,7 +109,7 @@ def test_experimental_list_tree_optional_deps_are_controlled_by_option(
     )
 
 
-def test_experimental_list_tree_prints_no_mods_when_all_mods_are_disabled(
+def test_list_tree_prints_no_enabled_mods_when_all_mods_are_disabled(
     mods_dir: Path, mod_zip_factory, capsys
 ):
     mod_zip_factory(mods_dir, "Root.zip", "Root")
@@ -248,18 +117,14 @@ def test_experimental_list_tree_prints_no_mods_when_all_mods_are_disabled(
 
     mod_manager.analyse_mod_deps(maxdepth=2)
 
-    assert capsys.readouterr().out == "No mods installed.\n"
+    assert capsys.readouterr().out == "No enabled mods.\n"
 
 
-@pytest.mark.parametrize("experimental", [True, False])
 def test_list_tree_tolerates_optional_dependency_cycle(
     mods_dir: Path,
     mod_zip_factory,
-    monkeypatch,
     capsys,
-    experimental: bool,
 ):
-    monkeypatch.setattr(config, "_ENABLE_EXPERIMENTAL_APPLY", experimental)
     build_three_mod_optional_cycle(mods_dir, mod_zip_factory)
 
     exit_code = CelesteModCLI().list_tree(["--optional-deps", "--maxdepth", "4"])
@@ -281,9 +146,7 @@ def test_list_tree_tolerates_mixed_required_and_optional_cycle(
     mods_dir: Path, mod_zip_factory, capsys
 ):
     mod_zip_factory(mods_dir, "Alpha.zip", "Alpha", deps=[_dep("Beta")])
-    mod_zip_factory(
-        mods_dir, "Beta.zip", "Beta", optional_deps=[_dep("Alpha")]
-    )
+    mod_zip_factory(mods_dir, "Beta.zip", "Beta", optional_deps=[_dep("Alpha")])
 
     mod_manager.analyse_mod_deps(maxdepth=3, optional=True)
 
@@ -348,17 +211,14 @@ def test_list_tree_tolerates_optional_dependency_self_cycle(
         "dependencies.\n"
     )
     assert captured.out == (
-        "SelfCycle (1.0.0)\n"
-        "└── SelfCycle (1.0.0) (Optional) [CYCLE]\n"
+        "SelfCycle (1.0.0)\n" "└── SelfCycle (1.0.0) (Optional) [CYCLE]\n"
     )
 
 
 def test_list_tree_prints_cycle_reached_from_root_and_disconnected_root(
     mods_dir: Path, mod_zip_factory, capsys
 ):
-    mod_zip_factory(
-        mods_dir, "Entry.zip", "Entry", deps=[_dep("AlphaHelper")]
-    )
+    mod_zip_factory(mods_dir, "Entry.zip", "Entry", deps=[_dep("AlphaHelper")])
     mod_zip_factory(
         mods_dir,
         "AlphaHelper.zip",

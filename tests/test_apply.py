@@ -1,7 +1,7 @@
 from pathlib import Path
 from types import SimpleNamespace
 
-from src import config, mod_manager
+from src import mod_manager
 from src.cli import CelesteModCLI
 
 _EXPECTED_BLACKLIST_HEADER = (
@@ -54,7 +54,7 @@ def test_parse_required_mods_file_ignores_empty_lines_and_line_comments(
     ]
 
 
-def test_apply_existing_mods_rewrites_blacklist_without_root_metadata(
+def test_apply_existing_mods_rewrites_state_without_touching_legacy_metadata(
     mods_dir: Path, mod_zip_factory
 ):
     mod_zip_factory(mods_dir, "Root.zip", "Root", deps=[_dep("Dependency")])
@@ -63,6 +63,8 @@ def test_apply_existing_mods_rewrites_blacklist_without_root_metadata(
     (mods_dir / "blacklist.txt").write_text(
         "OldManualEntry.zip\nRoot.zip\n", encoding="utf-8"
     )
+    legacy_metadata = b"not: [valid\n"
+    (mods_dir / "installed_mods.yml").write_bytes(legacy_metadata)
 
     plan = mod_manager.build_apply_plan(["Root"])
 
@@ -78,19 +80,19 @@ def test_apply_existing_mods_rewrites_blacklist_without_root_metadata(
     assert (mods_dir / "modoptionsorder.txt").read_text(encoding="utf-8") == (
         _EXPECTED_MOD_OPTIONS_ORDER_HEADER + "Root.zip\n"
     )
-    assert not (mods_dir / "installed_mods.yml").exists()
+    assert (mods_dir / "installed_mods.yml").read_bytes() == legacy_metadata
 
 
-def test_ensure_mod_root_false_does_not_record_existing_mod(
-    mods_dir: Path, mod_zip_factory
-):
+def test_ensure_mod_ignores_legacy_root_metadata(mods_dir: Path, mod_zip_factory):
     mod_zip_factory(mods_dir, "Root.zip", "Root")
+    legacy_metadata = b"not: [valid\n"
+    (mods_dir / "installed_mods.yml").write_bytes(legacy_metadata)
 
-    result = mod_manager.ensure_mod("Root", root=False)
+    result = mod_manager.ensure_mod("Root")
 
     assert result.status == mod_manager.EnsureModStatus.ALREADY_EXISTS
     assert result.mod is not None
-    assert not (mods_dir / "installed_mods.yml").exists()
+    assert (mods_dir / "installed_mods.yml").read_bytes() == legacy_metadata
 
 
 def test_apply_downloads_missing_root_and_dependency(
@@ -273,7 +275,10 @@ def test_apply_aggregates_failures_and_reports_retained_downloads(
     )
     assert "failed to download mod 'NetworkRoot' after 3 attempts" in captured.err
     assert "failed to build apply plan" not in captured.err
-    assert "following verified downloads remain cached" in captured.err
+    assert (
+        "following verified downloads remain installed but were not enabled"
+        in captured.err
+    )
     assert "CachedRoot (v1.0.0) [CachedRoot.zip]" in captured.err
     assert (mods_dir / "CachedRoot.zip").exists()
     assert not (mods_dir / "blacklist.txt").exists()
@@ -389,7 +394,9 @@ def test_apply_cli_requirement_file_rewrites_blacklist(
     exit_code = CelesteModCLI().apply(["-r", str(requirement_path)])
 
     assert exit_code == 0
-    assert "Requested mods: 1\n" in capsys.readouterr().out
+    captured = capsys.readouterr()
+    assert "Requested mods: 1\n" in captured.out
+    assert "experimental" not in (captured.out + captured.err).lower()
     assert (mods_dir / "blacklist.txt").read_text(encoding="utf-8") == (
         _EXPECTED_BLACKLIST_HEADER + "Other.zip\n"
     )
@@ -434,21 +441,6 @@ def test_apply_cli_writes_mod_options_order_with_everest_placeholder(
     assert (mods_dir / "modoptionsorder.txt").read_text(encoding="utf-8") == (
         _EXPECTED_MOD_OPTIONS_ORDER_HEADER + "Root.zip\nEverest\nOther.zip\n"
     )
-
-
-def test_apply_cli_returns_error_when_experimental_apply_is_disabled(
-    mods_dir: Path, monkeypatch, capsys
-):
-    requirement_path = mods_dir / "req.txt"
-    requirement_path.write_text("Root\n", encoding="utf-8")
-    monkeypatch.setattr(config, "_ENABLE_EXPERIMENTAL_APPLY", False)
-
-    exit_code = CelesteModCLI().apply(["-r", str(requirement_path)])
-
-    captured = capsys.readouterr()
-    assert exit_code == 1
-    assert "experimental apply feature is not enabled" in captured.err
-    assert not (mods_dir / "blacklist.txt").exists()
 
 
 def test_apply_cli_uses_default_required_mods_path(mods_dir: Path, mod_zip_factory):

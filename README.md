@@ -5,11 +5,12 @@ A command-line tool for managing Celeste mods.
 ## Features
 
 - Search the mod database
-- Install one or multiple mods
-- Install from a requirements file
-- Resolve and install dependencies
+- Apply a declarative mod requirement file
+- Resolve and download dependencies
 - List installed mods
-- Display dependency tree for installed mods
+- Display the dependency tree for enabled mods
+- Check and apply mod updates
+- Garbage-collect disabled mod archives after confirmation
 
 ## Project Status
 
@@ -31,6 +32,36 @@ pip install .
 ```
 
 Now you can use `celeste-mod-manager` to manage your Celeste mods in the command line. Check `celeste-mod-manager help` for documentation.
+
+## Declarative workflow
+
+An installed mod is any valid mod archive in Celeste's `Mods` directory, whether
+it is enabled or disabled. The desired enabled state comes from a requirement
+file containing one requested mod name per line. By default, the manager reads
+`Mods/required_mods.txt`:
+
+```text
+StrawberryJam2021
+CelesteTAS
+```
+
+Apply that desired state with:
+
+```sh
+celeste-mod-manager apply
+```
+
+`apply` downloads missing requested mods and dependencies, then rewrites
+`blacklist.txt` and `modoptionsorder.txt` to match the requested dependency
+closure. To stop using a mod, remove it from the requirement file and run
+`apply` again. Its now-unneeded archive remains installed but disabled until you
+explicitly delete disabled archives with:
+
+```sh
+celeste-mod-manager gc
+```
+
+Legacy `Mods/installed_mods.yml` files are ignored and left untouched.
 
 ## License
 

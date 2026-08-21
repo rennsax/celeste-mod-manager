@@ -8,7 +8,6 @@ from src.path import set_mod_paths
 
 def test_mods_dir_fixture_monkeypatches_config(mods_dir: Path):
     assert config.MODS_DIR == str(mods_dir)
-    assert config._ENABLE_ROOT_INSTALL_TRACK is True
 
 
 def test_set_mod_paths_stores_mod_db_in_mods_dir(tmp_path: Path):

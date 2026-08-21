@@ -9,7 +9,6 @@ from typing import Sequence
 from loguru import logger
 
 from . import mod_manager, mod_db
-from .mod_manager import EnsureModStatus
 from . import config
 from .operation import IssueKind, IssueSeverity, OperationIssue, has_errors
 
@@ -203,177 +202,6 @@ class CelesteModCLI:
 
         return entries
 
-    def _install_mod(
-        self,
-        mod_name: str,
-        no_dep: bool = False,
-        optional_deps: bool = False,
-        scan_result: mod_manager.LocalModScanResult | None = None,
-    ) -> bool:
-        print(f"Processing {mod_name}")
-        if scan_result is None:
-            scan_result = self._scan_installed_mods()
-            if has_errors(scan_result.issues):
-                return False
-        ensure_result = mod_manager.ensure_mod(
-            mod_name,
-            root=True,
-            scan_result=mod_manager.LocalModScanResult(scan_result.mods),
-        )
-        self._render_issues(ensure_result.issues)
-        mod = ensure_result.mod
-        if mod is None:
-            return False
-
-        if ensure_result.status == EnsureModStatus.ALREADY_EXISTS:
-            print(f"Requirement already satisfied: {mod.name} ({mod.version})")
-
-        if no_dep:
-            return True
-
-        print(f"Installing dependencies for {mod.name}")
-        resolution_result = mod_manager.resolve_deps(
-            mod,
-            optional=optional_deps,
-            scan_result=mod_manager.LocalModScanResult(scan_result.mods),
-        )
-        self._render_issues(resolution_result.issues)
-        resolved_deps = resolution_result.resolved
-        for resolved_dep in resolved_deps:
-            if resolved_dep not in scan_result.mods:
-                scan_result.mods.append(resolved_dep)
-        if resolved_deps:
-            print("Installed dependencies:")
-            for dep in resolved_deps:
-                print(f"  - {dep.name} (v{dep.version})")
-            print()
-        elif resolution_result.ok:
-            print("No dependencies to install.")
-        if not resolution_result.ok:
-            return False
-
-        disabled_required_mods = mod_manager.get_disabled_required_mods(
-            mod, optional=optional_deps
-        )
-        if disabled_required_mods:
-            print(
-                "The following locally installed mod(s) are required to run "
-                f"{mod.name}, but are disabled by the blacklist:"
-            )
-            for required_mod in disabled_required_mods:
-                print(
-                    f"  - {required_mod.name} "
-                    f"(v{required_mod.version}) [{required_mod.get_filename()}]"
-                )
-            answer = input("Enable them now? [y/N] ").strip().lower()
-            if answer not in ("y", "yes"):
-                print("Skipped enabling required mods.")
-                return False
-            if not mod_manager.enable_mods(disabled_required_mods):
-                print("ERROR: failed to enable required mods.", file=sys.stderr)
-                return False
-            print("Successfully enabled required mods.")
-        return True
-
-    def install(
-        self, args: Sequence[str], prog_name: str = "celeste-mod-manager install"
-    ) -> int:
-        """Install a single mod or install from a requirement file."""
-
-        def show_help() -> None:
-            print(
-                textwrap.dedent(
-                    f"""\
-                Usage:
-                  {prog_name} [options] MOD...
-                    Install some mod(s).
-
-                  {prog_name} [options] -r FILE
-                    Install mods declaratively from the mods listed in FILE, one per line.
-
-                  {prog_name} --help | -h
-                    Show this help message.
-
-                Examples:
-                  {prog_name} StrawberryJam2021
-                  {prog_name} -r required_mods.txt
-
-                Options:
-                  --no-deps        Do not resolve and install mod dependencies.
-                  --optional-deps  Also include optional dependencies when resolving dependencies."""
-                )
-            )
-
-        parser = optparse.OptionParser(
-            prog=prog_name,
-            add_help_option=False,
-            usage="",
-        )
-        parser.add_option("-r", "--requirement", dest="requirement", metavar="FILE")
-        parser.add_option("-h", "--help", action="store_true", dest="help")
-        parser.add_option(
-            "--no-deps", action="store_true", dest="no_deps", default=False
-        )
-        parser.add_option(
-            "--optional-deps", action="store_true", dest="optional_deps", default=False
-        )
-
-        options, positionals = parser.parse_args(list(args))
-        logger.debug(f"Parsed options: {options}, positionals: {positionals}")
-
-        if options.help:
-            show_help()
-            return 0
-        if options.requirement and len(positionals) > 0:
-            print(
-                "ERROR: cannot specify both a requirement file and some mod name(s).",
-                file=sys.stderr,
-            )
-            return 1
-        if not options.requirement and len(positionals) == 0:
-            print("ERROR: no mod specified to install.", file=sys.stderr)
-            return 1
-
-        # The root mods to install
-        mods_to_install: list[str] = list()
-
-        if options.requirement:
-            if not os.path.isfile(options.requirement):
-                print(
-                    f"ERROR: requirement file '{options.requirement}' not found.",
-                    file=sys.stderr,
-                )
-                return 1
-            with open(options.requirement, "r", encoding="utf-8") as f:
-                for raw_line in f:
-                    mod_name = raw_line.strip()
-                    if not mod_name or mod_name.startswith("#"):
-                        continue
-                    mods_to_install.append(mod_name)
-        elif len(positionals) > 0:
-            mods_to_install = positionals
-
-        if len(mods_to_install) == 0:
-            print("WARNING: no mod specified to install.", file=sys.stderr)
-            return 1
-
-        exit_code = 0
-        scan_result = self._scan_installed_mods()
-        if has_errors(scan_result.issues):
-            return 1
-        for mod_name in mods_to_install:
-            if not self._install_mod(
-                mod_name,
-                no_dep=options.no_deps,
-                optional_deps=options.optional_deps,
-                scan_result=scan_result,
-            ):
-                exit_code = 1
-            else:
-                print(f"Successfully installed '{mod_name}'.\n")
-
-        return exit_code
-
     def search(self, args: list[str]) -> int:
         """Search for mods in the database and print their information."""
         if not args:
@@ -400,13 +228,6 @@ class CelesteModCLI:
         """List installed mods."""
         parser = optparse.OptionParser(prog=prog_name)
         parser.add_option(
-            "--root",
-            action="store_true",
-            dest="root_only",
-            default=False,
-            help="Only list root mods (i.e. mods that are directly installed by the user).",
-        )
-        parser.add_option(
             "--enabled",
             action="store_true",
             dest="enabled_only",
@@ -417,12 +238,7 @@ class CelesteModCLI:
         scan_result = self._scan_installed_mods()
         if has_errors(scan_result.issues):
             return 1
-        mods = []
-        if options.root_only:
-            logger.debug("Listing only root mods.")
-            mods = mod_manager.get_root_mods()
-        else:
-            mods = scan_result.mods
+        mods = scan_result.mods
         if options.enabled_only:
             blacklisted_filenames = mod_manager.get_blacklisted_mod_filenames()
             mods = [
@@ -453,13 +269,6 @@ class CelesteModCLI:
             default=False,
             help="Also include optional dependencies in the tree.",
         )
-        parser.add_option(
-            "--enabled",
-            action="store_true",
-            dest="enabled_only",
-            default=False,
-            help="Only include enabled mods in the tree.",
-        )
         options, _ = parser.parse_args(args)
         if options.max_depth <= 0:
             print("ERROR: max depth must be a positive integer.", file=sys.stderr)
@@ -470,7 +279,6 @@ class CelesteModCLI:
         mod_manager.analyse_mod_deps(
             maxdepth=options.max_depth,
             optional=options.optional_deps,
-            enabled_only=options.enabled_only,
         )
         return 0
 
@@ -590,7 +398,7 @@ class CelesteModCLI:
     def apply(
         self, args: Sequence[str], prog_name: str = "celeste-mod-manager apply"
     ) -> int:
-        """Experimentally apply Mods/required_mods.txt as the desired mod state."""
+        """Apply a requirement file as the desired mod state."""
 
         def show_help() -> None:
             print(
@@ -612,9 +420,7 @@ class CelesteModCLI:
                                           or writing any configuration files.
                   --optional-deps         Also include optional dependencies when resolving dependencies.
 
-                Note: this command is experimental! Its behavior might be changed in the future.
-
-                The apply command treats Mods as a local cache and rewrites blacklist.txt / modoptionsoder.txt from the requested mods plus their required dependencies."""
+                The apply command rewrites blacklist.txt and modoptionsorder.txt from the requested mods plus their required dependencies."""
                 )
             )
 
@@ -639,16 +445,6 @@ class CelesteModCLI:
         if options.help:
             show_help()
             return 0
-        if not config._ENABLE_EXPERIMENTAL_APPLY:
-            print(
-                "ERROR: experimental apply feature is not enabled.",
-                file=sys.stderr,
-            )
-            return 1
-        print(
-            "\033[1;33mWARNING: `apply' subcommand is experimental and its behavior may change "
-            "in future versions.\033[0m"
-        )
         if positionals:
             print(
                 f"ERROR: unexpected argument(s): {' '.join(positionals)}",
@@ -691,7 +487,7 @@ class CelesteModCLI:
             if plan.downloaded:
                 print(
                     "WARNING: apply did not update generated state files; the "
-                    "following verified downloads remain cached:",
+                    "following verified downloads remain installed but were not enabled:",
                     file=sys.stderr,
                 )
                 for mod in sorted(plan.downloaded, key=lambda mod: mod.name.casefold()):
@@ -771,220 +567,6 @@ class CelesteModCLI:
 
         print("ERROR: failed to delete mods.", file=sys.stderr)
         return 1
-
-    def uninstall(
-        self, args: Sequence[str], prog_name: str = "celeste-mod-manager uninstall"
-    ) -> int:
-        """Uninstall root mod(s) and dependencies that only they require."""
-        parser = optparse.OptionParser(prog=prog_name)
-        parser.add_option(
-            "-f",
-            "--force",
-            action="store_true",
-            dest="force",
-            default=False,
-            help="Force uninstall specified mod(s), even if they are not root mods.",
-        )
-        options, positionals = parser.parse_args(list(args))
-
-        if len(positionals) == 0:
-            print("ERROR: no mod specified to uninstall.", file=sys.stderr)
-            return 1
-
-        if not config._ENABLE_ROOT_INSTALL_TRACK:
-            print(
-                "ERROR: uninstall is not implemented when root install tracking is disabled.",
-                file=sys.stderr,
-            )
-            return 1
-
-        scan_result = self._scan_installed_mods()
-        if has_errors(scan_result.issues):
-            return 1
-
-        planned_mods_by_name: dict[str, mod_manager.Mod] = {}
-        skipped_mods = 0
-        valid_mod_names = []
-        for mod_name in positionals:
-            mods_to_uninstall, status = mod_manager.build_uninstall_plan(
-                mod_name, force=options.force
-            )
-            if status == mod_manager.UninstallModStatus.NOT_INSTALLED:
-                print(f"ERROR: mod '{mod_name}' is not installed.", file=sys.stderr)
-                skipped_mods += 1
-                continue
-            if status == mod_manager.UninstallModStatus.NOT_RECORDED_ROOT:
-                print(
-                    f"ERROR: mod '{mod_name}' is not a recorded root mod. Uninstalling it may break other installed mods.",
-                    file=sys.stderr,
-                )
-                skipped_mods += 1
-                continue
-            if status == mod_manager.UninstallModStatus.UNEXPECTED:
-                print(
-                    f"ERROR: failed to build uninstall plan for mod '{mod_name}'.",
-                    file=sys.stderr,
-                )
-                skipped_mods += 1
-                continue
-            if status == mod_manager.UninstallModStatus.ROOT_TRACK_DISABLED:
-                print(
-                    "ERROR: uninstall is not implemented when root install tracking is disabled.",
-                    file=sys.stderr,
-                )
-                return 1
-
-            valid_mod_names.append(mod_name)
-            for mod in mods_to_uninstall:
-                planned_mods_by_name[mod.name] = mod
-
-        if not planned_mods_by_name:
-            print("ERROR: no valid mod specified to uninstall.", file=sys.stderr)
-            return 1
-
-        mods_to_uninstall = sorted(
-            planned_mods_by_name.values(), key=lambda mod: mod.name.lower()
-        )
-        requested_mods = ", ".join(valid_mod_names)
-        if options.force:
-            print(
-                f"Force uninstall is enabled. The following mod(s) will be uninstalled for: {requested_mods}"
-            )
-        else:
-            print(f"The following mod(s) will be uninstalled for: {requested_mods}")
-        for mod in mods_to_uninstall:
-            print(f"  - {mod.name} (v{mod.version}) [{mod.get_filename()}]")
-
-        answer = input("Proceed? [y/N] ").strip().lower()
-        if answer not in ("y", "yes"):
-            print("Skipped uninstalling mods.")
-            return 0
-
-        if mod_manager.uninstall_mods(mods_to_uninstall):
-            print("Successfully uninstalled mods.")
-            return 1 if skipped_mods else 0
-
-        print("ERROR: failed to uninstall mods.", file=sys.stderr)
-        return 1
-
-    def _toggle_mods(
-        self,
-        args: Sequence[str],
-        action: str,
-        prog_name: str,
-    ) -> int:
-        parser = optparse.OptionParser(prog=prog_name)
-        if action == "enable":
-            parser.add_option(
-                "--optional",
-                action="store_true",
-                dest="optional",
-                default=False,
-                help="Also enable optional dependencies.",
-            )
-        options, positionals = parser.parse_args(list(args))
-
-        if len(positionals) == 0:
-            print(f"ERROR: no mod specified to {action}.", file=sys.stderr)
-            return 1
-
-        scan_result = self._scan_installed_mods()
-        if has_errors(scan_result.issues):
-            return 1
-
-        planned_mods_by_name: dict[str, mod_manager.Mod] = {}
-        skipped_mods = 0
-        valid_mod_names = []
-        build_plan = (
-            mod_manager.build_disable_plan
-            if action == "disable"
-            else mod_manager.build_enable_plan
-        )
-        gerund_action = "disabling" if action == "disable" else "enabling"
-
-        for mod_name in positionals:
-            if action == "enable":
-                mods_to_toggle, status = build_plan(mod_name, optional=options.optional)
-            else:
-                mods_to_toggle, status = build_plan(mod_name)
-            if status == mod_manager.ModToggleStatus.NOT_INSTALLED:
-                print(f"ERROR: mod '{mod_name}' is not installed.", file=sys.stderr)
-                skipped_mods += 1
-                continue
-            if status == mod_manager.ModToggleStatus.NOT_RECORDED_ROOT:
-                print(
-                    f"ERROR: mod '{mod_name}' is not a recorded root mod. "
-                    f"{gerund_action.capitalize()} it may cause other mods to fail loading.",
-                    file=sys.stderr,
-                )
-                skipped_mods += 1
-                continue
-            if status == mod_manager.ModToggleStatus.ROOT_TRACK_DISABLED:
-                print(
-                    f"ERROR: {action} is not implemented when root install tracking is disabled.",
-                    file=sys.stderr,
-                )
-                return 1
-            if status == mod_manager.ModToggleStatus.ALREADY_DISABLED:
-                print(f"Mod '{mod_name}' is already disabled.")
-                continue
-            if status == mod_manager.ModToggleStatus.ALREADY_ENABLED:
-                print(f"Mod '{mod_name}' and its dependencies are already enabled.")
-                continue
-            if status == mod_manager.ModToggleStatus.UNEXPECTED:
-                print(
-                    f"ERROR: failed to build {action} plan for mod '{mod_name}'.",
-                    file=sys.stderr,
-                )
-                skipped_mods += 1
-                continue
-
-            valid_mod_names.append(mod_name)
-            for mod in mods_to_toggle:
-                planned_mods_by_name[mod.name] = mod
-
-        if not planned_mods_by_name:
-            print(f"No mods to {action}.")
-            return 1 if skipped_mods else 0
-
-        mods_to_toggle = sorted(
-            planned_mods_by_name.values(), key=lambda mod: mod.name.lower()
-        )
-        requested_mods = ", ".join(valid_mod_names)
-        blacklist_action = "added to" if action == "disable" else "removed from"
-        print(
-            f"The following mod(s) will be {blacklist_action} blacklist.txt for: {requested_mods}"
-        )
-        for mod in mods_to_toggle:
-            print(f"  - {mod.name} (v{mod.version}) [{mod.get_filename()}]")
-
-        answer = input("Proceed? [y/N] ").strip().lower()
-        if answer not in ("y", "yes"):
-            print(f"Skipped {gerund_action} mods.")
-            return 0
-
-        toggle_mods = (
-            mod_manager.disable_mods if action == "disable" else mod_manager.enable_mods
-        )
-        if toggle_mods(mods_to_toggle):
-            past_action = "disabled" if action == "disable" else "enabled"
-            print(f"Successfully {past_action} mods.")
-            return 1 if skipped_mods else 0
-
-        print(f"ERROR: failed to {action} mods.", file=sys.stderr)
-        return 1
-
-    def disable(
-        self, args: Sequence[str], prog_name: str = "celeste-mod-manager disable"
-    ) -> int:
-        """Disable mod(s) by adding them and exclusive dependencies to blacklist.txt."""
-        return self._toggle_mods(args, action="disable", prog_name=prog_name)
-
-    def enable(
-        self, args: Sequence[str], prog_name: str = "celeste-mod-manager enable"
-    ) -> int:
-        """Enable mod(s) by removing them and disabled dependencies from blacklist.txt."""
-        return self._toggle_mods(args, action="enable", prog_name=prog_name)
 
     def _upgrade_mod(
         self,
@@ -1131,9 +713,3 @@ class CelesteModCLI:
                 ),
             )
         return exit_code
-
-
-if __name__ == "__main__":
-    cli = CelesteModCLI()
-    args = "-r required_mods.txt".split()
-    cli.install(args)

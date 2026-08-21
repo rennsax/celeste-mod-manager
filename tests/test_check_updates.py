@@ -104,6 +104,7 @@ def test_check_updates_sorts_mods_and_skips_blacklisted_remote_lookups(
     (mods_dir / "updaterblacklist.txt").write_text(
         "# Archive names only\nExcluded\nExcluded-custom.zip\n", encoding="utf-8"
     )
+    (mods_dir / "blacklist.txt").write_text("Outdated.zip\n", encoding="utf-8")
     monkeypatch.setattr(
         mod_manager,
         "get_installed_mods",

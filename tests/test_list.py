@@ -1,6 +1,7 @@
 from pathlib import Path
 
-from src import config
+import pytest
+
 from src.cli import CelesteModCLI
 
 
@@ -18,41 +19,12 @@ def test_list_mods_prints_all_installed_mods(mods_dir: Path, mod_zip_factory, ca
     )
 
 
-def test_list_mods_root_only_prints_recorded_root_mods(
-    mods_dir: Path, mod_zip_factory, installed_mods_writer, capsys
-):
-    mod_zip_factory(mods_dir, "RootMod.zip", "RootMod", "1.0.0")
-    mod_zip_factory(mods_dir, "DependencyMod.zip", "DependencyMod", "1.0.0")
-    installed_mods_writer(
-        mods_dir,
-        [
-            {
-                "name": "RootMod",
-                "version": "1.0.0",
-                "filename": "RootMod.zip",
-            }
-        ],
-    )
+def test_list_mods_rejects_removed_root_option(capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        CelesteModCLI().list_mods(["--root"])
 
-    CelesteModCLI().list_mods(["--root"])
-
-    assert capsys.readouterr().out == (
-        "Mod     Version Enabled\n"
-        "------- ------- -------\n"
-        "RootMod 1.0.0     ON   \n"
-    )
-
-
-def test_list_mods_root_only_uses_empty_root_mods_when_root_tracking_disabled(
-    mods_dir: Path, monkeypatch, capsys
-):
-    monkeypatch.setattr(config, "_ENABLE_ROOT_INSTALL_TRACK", False)
-
-    assert CelesteModCLI().list_mods(["--root"]) == 0
-
-    captured = capsys.readouterr()
-    assert captured.out == "No mods installed.\n"
-    assert captured.err == ""
+    assert exc_info.value.code == 2
+    assert "no such option: --root" in capsys.readouterr().err
 
 
 def test_list_mods_marks_disabled_mods(mods_dir: Path, mod_zip_factory, capsys):

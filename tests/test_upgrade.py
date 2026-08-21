@@ -69,6 +69,8 @@ def test_update_mod_replaces_blacklisted_archive_filenames_in_place(
             + f"# {old_filename}\r\n".encode()
         )
     )
+    legacy_metadata = b"not: [valid\n"
+    (mods_dir / "installed_mods.yml").write_bytes(legacy_metadata)
 
     result = mod_manager.update_mod(old_mod)
     updated_mod, status = result.mod, result.status
@@ -86,6 +88,7 @@ def test_update_mod_replaces_blacklisted_archive_filenames_in_place(
     )
     assert old_filename not in mod_manager.get_blacklisted_mod_filenames()
     assert new_filename in mod_manager.get_blacklisted_mod_filenames()
+    assert (mods_dir / "installed_mods.yml").read_bytes() == legacy_metadata
 
 
 def test_update_mod_replaces_ordered_archive_filenames_in_place(
@@ -659,6 +662,7 @@ def test_upgrade_all_lists_and_updates_only_outdated_mods_in_name_order(
     (mods_dir / "updaterblacklist.txt").write_text(
         "Blacklisted.zip\n", encoding="utf-8"
     )
+    (mods_dir / "blacklist.txt").write_text("AlphaOutdated.zip\n", encoding="utf-8")
     monkeypatch.setattr(
         mod_manager,
         "get_installed_mods",

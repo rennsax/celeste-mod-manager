@@ -31,29 +31,15 @@ def make_mod_zip(
     return mod_path
 
 
-def write_installed_mods(mods_dir: Path, roots: list[dict[str, str]]) -> Path:
-    installed_mods_path = mods_dir / "installed_mods.yml"
-    with installed_mods_path.open("w", encoding="utf-8") as f:
-        yaml.safe_dump({"root": roots}, f, sort_keys=False)
-    return installed_mods_path
-
-
 @pytest.fixture
 def mods_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(config, "MODS_DIR", str(tmp_path))
-    monkeypatch.setattr(config, "_ENABLE_ROOT_INSTALL_TRACK", True)
-    monkeypatch.setattr(config, "_ENABLE_EXPERIMENTAL_APPLY", True)
     return tmp_path
 
 
 @pytest.fixture
 def mod_zip_factory():
     return make_mod_zip
-
-
-@pytest.fixture
-def installed_mods_writer():
-    return write_installed_mods
 
 
 @pytest.fixture

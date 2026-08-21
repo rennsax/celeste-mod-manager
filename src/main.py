@@ -21,22 +21,15 @@ Commands:
     help               Show this help message.
     search             Search for mods in the mod database.
     list               List all installed mods.
-    list-tree          List all installed mods and their dependencies in a tree format.
-    install            Install some mod(s).
-    uninstall          Uninstall root mod(s).
+    list-tree          List enabled mods and their dependencies in a tree format.
+    apply              Apply the desired mod state from a requirement file.
     gc, garbage-collect
                        Delete all currently disabled mod archives.
-    disable            Disable mod(s) by adding them to Mods/blacklist.txt.
-    enable             Enable mod(s) by removing them from Mods/blacklist.txt.
     check-updates      Check updates for installed mods. Entries in
                        Mods/updaterblacklist.txt are marked and not checked.
     update-db          Force update the local mod database from the server.
     upgrade            Upgrade selected mod(s), or use ALL to upgrade every
                        outdated mod after confirmation.
-
-Experimental commands:
-    apply              Apply the mod specification (by default Mods/required_mods.txt
-                       under the Celeste directory) declaratively.
 
 Options:
     --celeste-dir <path>  Specify the path to the Celeste directory.
@@ -141,20 +134,12 @@ def _run_cli() -> int:
         return cli.list_mods(extra_args)
     elif subcommand == "list-tree":
         return cli.list_tree(extra_args, prog_name=f"celeste-mod-manager list-tree")
-    elif subcommand == "install":
-        return cli.install(extra_args, prog_name=f"celeste-mod-manager install")
     elif subcommand == "apply":
         return cli.apply(extra_args, prog_name=f"celeste-mod-manager apply")
     elif subcommand in {"gc", "garbage-collect"}:
         return cli.garbage_collect(
             extra_args, prog_name=f"celeste-mod-manager {subcommand}"
         )
-    elif subcommand == "uninstall":
-        return cli.uninstall(extra_args, prog_name=f"celeste-mod-manager uninstall")
-    elif subcommand == "disable":
-        return cli.disable(extra_args, prog_name=f"celeste-mod-manager disable")
-    elif subcommand == "enable":
-        return cli.enable(extra_args, prog_name=f"celeste-mod-manager enable")
     elif subcommand == "check-updates":
         return cli.check_updates(extra_args)
     elif subcommand == "update-db":

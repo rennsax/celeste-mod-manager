@@ -13,6 +13,29 @@ def _prepare_main(monkeypatch, tmp_path: Path, *args: str) -> None:
     monkeypatch.setattr(sys, "argv", ["celeste-mod-manager", *args])
 
 
+def test_help_lists_apply_as_a_regular_command(capsys):
+    main.cmd_help()
+
+    captured = capsys.readouterr()
+    assert "    apply              Apply the desired mod state" in captured.err
+    assert "Experimental commands:" not in captured.err
+    for command in ("install", "uninstall", "enable", "disable"):
+        assert f"    {command} " not in captured.err
+
+
+@pytest.mark.parametrize("command", ["install", "uninstall", "enable", "disable"])
+def test_removed_commands_are_unknown(
+    command: str, tmp_path: Path, monkeypatch, capsys
+):
+    _prepare_main(monkeypatch, tmp_path, command)
+
+    assert main.main() == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == "\n"
+    assert f"ERROR: unknown command '{command}'\n" in captured.err
+
+
 def test_search_requires_pattern_without_reading_database(monkeypatch, capsys):
     def fail_if_called(_pattern):
         raise AssertionError("search must not read the database without a pattern")

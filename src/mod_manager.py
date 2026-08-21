@@ -9,7 +9,6 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 import xxhash
-import yaml
 from loguru import logger
 from rich.console import Console
 from rich.progress import BarColumn, Progress, TextColumn
@@ -525,56 +524,6 @@ def _get_mod_dependency_closure_from_installed_dict(
     return closure
 
 
-def get_mods_exclusively_depending_on_closure(mod: Mod) -> list[Mod]:
-    if not config._ENABLE_ROOT_INSTALL_TRACK:
-        return [mod]
-
-    installed_mods = get_installed_mods()
-    installed_dict = {
-        installed_mod.name: installed_mod for installed_mod in installed_mods
-    }
-    root_names = {root_mod.name for root_mod in get_root_mods()}
-
-    reverse_graph: dict[str, set[str]] = {
-        installed_mod.name: set() for installed_mod in installed_mods
-    }
-    for installed_mod in installed_mods:
-        for dep in installed_mod.get_mod_deps(optional=True):
-            dep_name = dep.get("Name")
-            if (
-                not dep_name
-                or dep_name in ["Everest", "Celeste", "EverestCore"]
-                or dep_name not in installed_dict
-            ):
-                continue
-            reverse_graph[dep_name].add(installed_mod.name)
-
-    closure_names = {
-        closure_mod.name
-        for closure_mod in get_mod_dependency_closure(mod, optional=True)
-    }
-    changed = True
-    while changed:
-        changed = False
-        for name in list(closure_names):
-            if name == mod.name:
-                continue
-            if name in root_names or not reverse_graph.get(name, set()).issubset(
-                closure_names
-            ):
-                closure_names.remove(name)
-                changed = True
-
-    result = [installed_dict[mod.name]]
-    result.extend(
-        sorted(
-            (installed_dict[name] for name in closure_names if name != mod.name),
-            key=lambda installed_mod: installed_mod.name.lower(),
-        )
-    )
-    return result
-
-
 @dataclass
 class DependencyResolutionResult:
     resolved: list[Mod] = field(default_factory=list)
@@ -767,25 +716,6 @@ def resolve_deps(
     return DependencyResolutionResult(resolved=resolved_deps, issues=issues)
 
 
-def get_disabled_required_mods(mod: Mod, optional: bool = False) -> list[Mod]:
-    installed_mods = get_installed_mods()
-    installed_dict = {
-        installed_mod.name: installed_mod for installed_mod in installed_mods
-    }
-    blacklisted_filenames = get_blacklisted_mod_filenames()
-    closure = _get_mod_dependency_closure_from_installed_dict(
-        mod, installed_dict, optional=optional
-    )
-    return sorted(
-        (
-            closure_mod
-            for closure_mod in closure
-            if not _is_mod_enabled(closure_mod, blacklisted_filenames)
-        ),
-        key=lambda closure_mod: closure_mod.name.lower(),
-    )
-
-
 def pretty_print_mods(mods: list[Mod], show_enabled: bool = True):
     if not mods or len(mods) == 0:
         print("No mods installed.")
@@ -832,16 +762,7 @@ def _print_dependency_tree(
     graph: dict[str, list[tuple[str, bool]]],
     installed_dict: dict[str, Mod],
     maxdepth: int,
-    *,
-    blacklisted_filenames: set[str] | None = None,
-    orphan_roots: set[str] | None = None,
-    optional_dependents: dict[str, set[str]] | None = None,
-    show_disabled: bool = False,
 ):
-    blacklisted_filenames = blacklisted_filenames or set()
-    orphan_roots = orphan_roots or set()
-    optional_dependents = optional_dependents or {}
-
     def print_tree(
         node,
         prefix="",
@@ -854,15 +775,6 @@ def _print_dependency_tree(
         is_cycle = not is_root and node in path
         if is_root:
             display_node = f"{node} ({installed_dict[node].version})"
-            if show_disabled and not _is_mod_enabled(
-                installed_dict[node], blacklisted_filenames
-            ):
-                display_node = f"{display_node} \033[91m[DISABLED]\033[0m"
-            if node in orphan_roots:
-                display_node = f"{display_node} \033[1;33m[ORPHAN]\033[0m"
-            if node in optional_dependents and optional_dependents[node]:
-                dependents = ", ".join(sorted(optional_dependents[node], key=str.lower))
-                display_node = f"{display_node} (optionally depended by {dependents})"
             print(display_node)
             new_prefix = prefix
         else:
@@ -875,12 +787,6 @@ def _print_dependency_tree(
                     if node in installed_dict
                     else node
                 )
-                if (
-                    show_disabled
-                    and node in installed_dict
-                    and not _is_mod_enabled(installed_dict[node], blacklisted_filenames)
-                ):
-                    display_node = f"{display_node} \033[91m[DISABLED]\033[0m"
             if is_opt:
                 display_node = f"{display_node} (Optional)"
             if is_cycle:
@@ -1043,7 +949,7 @@ def _warn_about_optional_dependency_cycles(
         )
 
 
-def _analyse_enabled_mod_deps(maxdepth: int, optional: bool = False):
+def analyse_mod_deps(maxdepth: int, optional: bool = False):
     mods = get_installed_mods()
     if not mods:
         print("No mods installed.")
@@ -1052,7 +958,7 @@ def _analyse_enabled_mod_deps(maxdepth: int, optional: bool = False):
     blacklisted_filenames = get_blacklisted_mod_filenames()
     enabled_mods = [mod for mod in mods if _is_mod_enabled(mod, blacklisted_filenames)]
     if not enabled_mods:
-        print("No mods installed.")
+        print("No enabled mods.")
         return
 
     installed_dict = {mod.name: mod for mod in enabled_mods}
@@ -1088,7 +994,7 @@ def _analyse_enabled_mod_deps(maxdepth: int, optional: bool = False):
     _warn_about_optional_dependency_cycles(graph)
     roots = _get_dependency_graph_roots(graph, root_edges)
     if not roots:
-        print("No mods installed.")
+        print("No enabled mods.")
         return
 
     _print_dependency_tree(
@@ -1097,104 +1003,6 @@ def _analyse_enabled_mod_deps(maxdepth: int, optional: bool = False):
         installed_dict,
         maxdepth,
     )
-
-
-def analyse_mod_deps(maxdepth: int, optional: bool = False, enabled_only: bool = False):
-    if config._ENABLE_EXPERIMENTAL_APPLY:
-        _analyse_enabled_mod_deps(maxdepth=maxdepth, optional=optional)
-        return
-
-    mods = get_installed_mods()
-    if not mods:
-        print("No mods installed.")
-        return
-
-    blacklisted_filenames = get_blacklisted_mod_filenames()
-    installed_dict = {mod.name: mod for mod in mods}
-    graph = {}
-    root_edges: set[tuple[str, str]] = set()
-    optional_dependents: dict[str, set[str]] = {mod.name: set() for mod in mods}
-
-    for mod in mods:
-        graph[mod.name] = []
-        required_deps = mod.get_mod_deps(optional=False)
-        required_names = {d.get("Name") for d in required_deps if d.get("Name")}
-        optional_deps = [
-            dep
-            for dep in mod.get_mod_deps(optional=True)
-            if dep.get("Name") not in required_names
-        ]
-        deps = required_deps + (optional_deps if optional else [])
-
-        for dep in optional_deps:
-            dep_name = dep.get("Name")
-            if dep_name in installed_dict and (
-                not enabled_only or _is_mod_enabled(mod, blacklisted_filenames)
-            ):
-                optional_dependents[dep_name].add(mod.name)
-
-        for dep in deps:
-            dep_name = dep["Name"]
-            if not dep_name or dep_name in ["Everest", "Celeste", "EverestCore"]:
-                continue
-
-            is_opt = dep_name not in required_names
-
-            if dep_name in installed_dict:
-                graph[mod.name].append((dep_name, is_opt))
-                if (not is_opt or optional) and (
-                    not enabled_only or _is_mod_enabled(mod, blacklisted_filenames)
-                ):
-                    root_edges.add((mod.name, dep_name))
-            else:
-                graph[mod.name].append((f"{dep_name} (Missing)", is_opt))
-
-    if _has_dependency_cycle(graph, include_optional=False):
-        logger.critical("Cycle detected in the dependency graph.")
-        sys.exit(1)
-
-    _warn_about_optional_dependency_cycles(graph)
-    eligible_roots = (
-        {mod.name for mod in mods if _is_mod_enabled(mod, blacklisted_filenames)}
-        if enabled_only
-        else None
-    )
-    roots = _get_dependency_graph_roots(graph, root_edges, eligible_roots)
-    if not roots:
-        print("No mods installed.")
-        return
-
-    recorded_root_names = {mod.name for mod in get_root_mods()}
-    orphan_roots = (
-        {
-            root
-            for root in roots
-            if root not in recorded_root_names and not optional_dependents[root]
-        }
-        if config._ENABLE_ROOT_INSTALL_TRACK
-        else set()
-    )
-
-    _print_dependency_tree(
-        roots,
-        graph,
-        installed_dict,
-        maxdepth,
-        blacklisted_filenames=blacklisted_filenames,
-        orphan_roots=orphan_roots,
-        optional_dependents=optional_dependents,
-        show_disabled=True,
-    )
-
-    if orphan_roots:
-        print()
-        print("\033[1;33mWARNING:\033[0m Orphan root mod(s) detected:")
-        for mod_name in sorted(orphan_roots, key=str.lower):
-            print(f"  - {mod_name}")
-        print(
-            "Use `celeste-mod-manager install MOD...' to record them as root mods,\n"
-            " or `celeste-mod-manager uninstall MOD...' to remove them."
-        )
 
 
 class EnsureModStatus(Enum):
@@ -1212,168 +1020,6 @@ class EnsureModResult:
     @property
     def ok(self) -> bool:
         return self.mod is not None and not has_errors(self.issues)
-
-
-def _get_installed_mods_record_path(for_write: bool = False) -> str:
-    installed_mods_path = os.path.join(config.MODS_DIR, "installed_mods.yml")
-    return installed_mods_path
-
-
-def _record_root_installed_mod(mod: Mod) -> None:
-    if not config._ENABLE_ROOT_INSTALL_TRACK:
-        return
-
-    logger.debug(f"Try to record root mod '{mod.name}' with version '{mod.version}'.")
-    installed_mods_path = _get_installed_mods_record_path(for_write=True)
-
-    data: dict = {}
-    roots = None
-    if os.path.exists(installed_mods_path):
-        with open(installed_mods_path, "r", encoding="utf-8") as f:
-            loaded = yaml.safe_load(f)
-            if isinstance(loaded, dict):
-                data = loaded
-            else:
-                logger.warning(
-                    f"Unexpected format in '{installed_mods_path}'. Attempt to overwrite it with new data."
-                )
-        roots = data.get("root")
-        if not isinstance(roots, list):
-            logger.warning(
-                f"Unexpected format in '{installed_mods_path}'. Attempt to overwrite it with new data."
-            )
-            roots = []
-    else:
-        roots = []
-
-    root_entry = {
-        "name": mod.name,
-        "version": mod.version,
-        "filename": mod.get_filename(),
-    }
-
-    for recorded_mod in roots:
-        if not isinstance(recorded_mod, dict):
-            logger.warning(
-                f"Invalid entry in 'root' list in '{installed_mods_path}': {recorded_mod}"
-            )
-            continue
-        if recorded_mod.get("name") == mod.name:
-            logger.debug(
-                f"Mod '{mod.name}' already recorded as root mod. Updating version to '{mod.version}'."
-            )
-            recorded_mod.update(root_entry)
-            break
-    else:
-        logger.debug(
-            f"Recording '{mod.name}' as a new root mod with version '{mod.version}'."
-        )
-        roots.append(root_entry)
-
-    data["root"] = roots
-    with open(installed_mods_path, "w", encoding="utf-8") as f:
-        yaml.safe_dump(data, f, sort_keys=False, allow_unicode=True)
-
-
-def _remove_root_installed_mods(mod_names: set[str]) -> None:
-    if not config._ENABLE_ROOT_INSTALL_TRACK:
-        return
-
-    installed_mods_path = _get_installed_mods_record_path()
-    if not os.path.exists(installed_mods_path):
-        return
-
-    with open(installed_mods_path, "r", encoding="utf-8") as f:
-        data = yaml.safe_load(f)
-    if not isinstance(data, dict):
-        logger.warning(
-            f"Unexpected format in '{installed_mods_path}'. No root mods removed."
-        )
-        return
-
-    roots = data.get("root", [])
-    if not isinstance(roots, list):
-        logger.warning(
-            f"Unexpected format for 'root' in '{installed_mods_path}'. No root mods removed."
-        )
-        return
-
-    data["root"] = [
-        entry
-        for entry in roots
-        if not isinstance(entry, dict) or entry.get("name") not in mod_names
-    ]
-
-    with open(installed_mods_path, "w", encoding="utf-8") as f:
-        yaml.safe_dump(data, f, sort_keys=False, allow_unicode=True)
-
-
-def get_root_mods() -> list[Mod]:
-    if not config._ENABLE_ROOT_INSTALL_TRACK:
-        return []
-
-    installed_mods_path = _get_installed_mods_record_path()
-    if not os.path.exists(installed_mods_path):
-        return []
-
-    with open(installed_mods_path, "r", encoding="utf-8") as f:
-        data = yaml.safe_load(f)
-        if not isinstance(data, dict):
-            logger.warning(
-                f"Unexpected format in '{installed_mods_path}'. No root mods loaded."
-            )
-            return []
-        roots = data.get("root", [])
-        if not isinstance(roots, list):
-            logger.warning(
-                f"Unexpected format for 'root' in '{installed_mods_path}'. No root mods loaded."
-            )
-            return []
-        mods = []
-        installed_mods = get_installed_mods()
-        for entry in roots:
-            if isinstance(entry, dict) and "name" in entry and "version" in entry:
-                matched_mod = None
-                filename = entry.get("filename")
-                if isinstance(filename, str):
-                    matched_mod = Mod.from_filename(filename)
-                    if matched_mod and (
-                        matched_mod.name != entry["name"]
-                        or matched_mod.version != entry["version"]
-                    ):
-                        logger.warning(
-                            f"Root mod '{filename}' metadata does not match recorded entry '{entry['name']}' with version '{entry['version']}'."
-                        )
-                        matched_mod = None
-                if not matched_mod:
-                    matched_mod = next(
-                        (
-                            mod
-                            for mod in installed_mods
-                            if mod.name == entry["name"]
-                            and mod.version == entry["version"]
-                        ),
-                        None,
-                    )
-                if matched_mod:
-                    mods.append(matched_mod)
-                else:
-                    logger.warning(
-                        f"Root mod '{entry['name']}' with version '{entry['version']}' is not installed."
-                    )
-            else:
-                logger.warning(
-                    f"Invalid entry in 'root' list in '{installed_mods_path}': {entry}"
-                )
-        return mods
-
-
-class UninstallModStatus(Enum):
-    READY = "ready"
-    ROOT_TRACK_DISABLED = "root_track_disabled"
-    NOT_INSTALLED = "not_installed"
-    NOT_RECORDED_ROOT = "not_recorded_root"
-    UNEXPECTED = "unexpected"
 
 
 _BLACKLIST_HEADER = (
@@ -1534,155 +1180,8 @@ def _is_mod_enabled(mod: Mod, blacklisted_filenames: set[str]) -> bool:
     return mod.get_filename() not in blacklisted_filenames
 
 
-def _get_mod_dependency_closure_from_available_mods(
-    mod: Mod,
-    available_mods: list[Mod],
-    optional: bool = False,
-    _visited: set[str] | None = None,
-) -> list[Mod]:
-    available_dict = {
-        available_mod.name: available_mod for available_mod in available_mods
-    }
-    return _get_mod_dependency_closure_from_installed_dict(
-        mod, available_dict, optional=optional, _visited=_visited
-    )
-
-
-class ModToggleStatus(Enum):
-    READY = "ready"
-    ROOT_TRACK_DISABLED = "root_track_disabled"
-    NOT_INSTALLED = "not_installed"
-    NOT_RECORDED_ROOT = "not_recorded_root"
-    ALREADY_ENABLED = "already_enabled"
-    ALREADY_DISABLED = "already_disabled"
-    UNEXPECTED = "unexpected"
-
-
-def build_disable_plan(mod_name: str) -> tuple[list[Mod], ModToggleStatus]:
-    if not config._ENABLE_ROOT_INSTALL_TRACK:
-        return [], ModToggleStatus.ROOT_TRACK_DISABLED
-
-    try:
-        installed_mods = get_installed_mods()
-        installed_dict = {mod.name: mod for mod in installed_mods}
-        if mod_name not in installed_dict:
-            return [], ModToggleStatus.NOT_INSTALLED
-
-        root_names = {mod.name for mod in get_root_mods()}
-        if mod_name not in root_names:
-            return [], ModToggleStatus.NOT_RECORDED_ROOT
-
-        blacklisted_filenames = get_blacklisted_mod_filenames()
-        target_mod = installed_dict[mod_name]
-        if not _is_mod_enabled(target_mod, blacklisted_filenames):
-            return [], ModToggleStatus.ALREADY_DISABLED
-
-        enabled_mods = [
-            mod for mod in installed_mods if _is_mod_enabled(mod, blacklisted_filenames)
-        ]
-        enabled_dict = {mod.name: mod for mod in enabled_mods}
-        reverse_graph: dict[str, set[str]] = {mod.name: set() for mod in enabled_mods}
-        for enabled_mod in enabled_mods:
-            for dep in enabled_mod.get_mod_deps(optional=True):
-                dep_name = dep.get("Name")
-                if (
-                    not dep_name
-                    or dep_name in ["Everest", "Celeste", "EverestCore"]
-                    or dep_name not in enabled_dict
-                ):
-                    continue
-                reverse_graph[dep_name].add(enabled_mod.name)
-
-        closure_names = {
-            closure_mod.name
-            for closure_mod in _get_mod_dependency_closure_from_available_mods(
-                target_mod, enabled_mods, optional=True
-            )
-        }
-        changed = True
-        while changed:
-            changed = False
-            for name in list(closure_names):
-                if name == target_mod.name:
-                    continue
-                if name in root_names or not reverse_graph.get(name, set()).issubset(
-                    closure_names
-                ):
-                    closure_names.remove(name)
-                    changed = True
-
-        result = [target_mod]
-        result.extend(
-            sorted(
-                (
-                    enabled_dict[name]
-                    for name in closure_names
-                    if name != target_mod.name
-                ),
-                key=lambda mod: mod.name.lower(),
-            )
-        )
-        return result, ModToggleStatus.READY
-    except Exception as e:
-        logger.error(f"Failed to build disable plan for mod '{mod_name}': {e}")
-        return [], ModToggleStatus.UNEXPECTED
-
-
-def build_enable_plan(
-    mod_name: str, optional: bool = False
-) -> tuple[list[Mod], ModToggleStatus]:
-    if not config._ENABLE_ROOT_INSTALL_TRACK:
-        return [], ModToggleStatus.ROOT_TRACK_DISABLED
-
-    try:
-        installed_mods = get_installed_mods()
-        installed_dict = {mod.name: mod for mod in installed_mods}
-        if mod_name not in installed_dict:
-            return [], ModToggleStatus.NOT_INSTALLED
-
-        root_names = {mod.name for mod in get_root_mods()}
-        if mod_name not in root_names:
-            return [], ModToggleStatus.NOT_RECORDED_ROOT
-
-        target_mod = installed_dict[mod_name]
-        blacklisted_filenames = get_blacklisted_mod_filenames()
-        closure = _get_mod_dependency_closure_from_installed_dict(
-            target_mod, installed_dict, optional=optional
-        )
-        mods_to_enable = [
-            mod for mod in closure if not _is_mod_enabled(mod, blacklisted_filenames)
-        ]
-        if not mods_to_enable:
-            return [], ModToggleStatus.ALREADY_ENABLED
-
-        return mods_to_enable, ModToggleStatus.READY
-    except Exception as e:
-        logger.error(f"Failed to build enable plan for mod '{mod_name}': {e}")
-        return [], ModToggleStatus.UNEXPECTED
-
-
-def disable_mods(mods: list[Mod]) -> bool:
-    try:
-        _write_blacklist_filenames({mod.get_filename() for mod in mods})
-        return True
-    except Exception as e:
-        logger.error(f"Failed to disable mods: {e}")
-        return False
-
-
-def enable_mods(mods: list[Mod]) -> bool:
-    try:
-        _write_blacklist_filenames(
-            filenames_to_remove={mod.get_filename() for mod in mods}
-        )
-        return True
-    except Exception as e:
-        logger.error(f"Failed to enable mods: {e}")
-        return False
-
-
 def build_garbage_collect_plan() -> list[Mod]:
-    """Return disabled local mod archives that can be safely removed."""
+    """Return disabled Installed Mod archives that can be safely removed."""
     blacklisted_filenames = get_blacklisted_mod_filenames()
     return sorted(
         (
@@ -1897,7 +1396,6 @@ def build_apply_plan(
 
             ensure_result = ensure_mod(
                 requested_name,
-                root=False,
                 scan_result=LocalModScanResult(scan_result.mods),
                 mod_info=mod_info,
             )
@@ -1912,11 +1410,13 @@ def build_apply_plan(
                 already_by_name[downloaded_mod.name] = downloaded_mod
             installed_dict[downloaded_mod.name] = downloaded_mod
 
-        root_mods = list(already_by_name.values()) + list(downloaded_by_name.values())
+        requested_mods = list(already_by_name.values()) + list(
+            downloaded_by_name.values()
+        )
         resolution_context = DependencyResolutionContext.from_mods(scan_result.mods)
-        for root_mod in root_mods:
+        for requested_mod in requested_mods:
             if dry_run:
-                for dep in root_mod.get_mod_deps(optional=optional):
+                for dep in requested_mod.get_mod_deps(optional=optional):
                     dep_name = dep.get("Name")
                     if (
                         not dep_name
@@ -1938,7 +1438,7 @@ def build_apply_plan(
                                     operation="database lookup",
                                     subject=dep_name,
                                     detail=str(e),
-                                    dependency_chain=(root_mod.name, dep_name),
+                                    dependency_chain=(requested_mod.name, dep_name),
                                     retryable=True,
                                 )
                             )
@@ -1953,13 +1453,13 @@ def build_apply_plan(
                                     operation="database lookup",
                                     subject=dep_name,
                                     detail="dependency was not found in the database",
-                                    dependency_chain=(root_mod.name, dep_name),
+                                    dependency_chain=(requested_mod.name, dep_name),
                                 )
                             )
                 continue
 
             resolution_result = resolve_deps(
-                root_mod,
+                requested_mod,
                 optional=optional,
                 context=resolution_context,
             )
@@ -2020,58 +1520,11 @@ def apply_required_mods(plan: ApplyPlan) -> bool:
         return False
 
 
-def build_uninstall_plan(
-    mod_name: str, force: bool = False
-) -> tuple[list[Mod], UninstallModStatus]:
-    if not config._ENABLE_ROOT_INSTALL_TRACK:
-        return [], UninstallModStatus.ROOT_TRACK_DISABLED
-
-    try:
-        installed_mods = get_installed_mods()
-        installed_dict = {mod.name: mod for mod in installed_mods}
-        if mod_name not in installed_dict:
-            return [], UninstallModStatus.NOT_INSTALLED
-
-        root_names = {mod.name for mod in get_root_mods()}
-        if mod_name not in root_names:
-            if force:
-                return [installed_dict[mod_name]], UninstallModStatus.READY
-            return [], UninstallModStatus.NOT_RECORDED_ROOT
-
-        return (
-            get_mods_exclusively_depending_on_closure(installed_dict[mod_name]),
-            UninstallModStatus.READY,
-        )
-    except Exception as e:
-        logger.error(f"Failed to build uninstall plan for mod '{mod_name}': {e}")
-        return [], UninstallModStatus.UNEXPECTED
-
-
-def uninstall_mods(mods: list[Mod]) -> bool:
-    try:
-        root_names = {mod.name for mod in get_root_mods()}
-        filenames_to_remove = {mod.get_filename() for mod in mods}
-        for mod in mods:
-            if os.path.exists(mod.filepath):
-                os.remove(mod.filepath)
-            else:
-                logger.warning(f"Mod file '{mod.filepath}' does not exist.")
-        _remove_root_installed_mods(
-            {mod.name for mod in mods if mod.name in root_names}
-        )
-        _write_blacklist_filenames(filenames_to_remove=filenames_to_remove)
-        return True
-    except Exception as e:
-        logger.error(f"Failed to uninstall mods: {e}")
-        return False
-
-
 _MOD_INFO_UNSET = object()
 
 
 def ensure_mod(
     mod_name: str,
-    root: bool = False,
     *,
     scan_result: LocalModScanResult | None = None,
     mod_info: ModInfo | None | object = _MOD_INFO_UNSET,
@@ -2096,23 +1549,6 @@ def ensure_mod(
         return EnsureModResult(None, EnsureModStatus.FAILED, issues)
     if found_mods:
         mod = found_mods[0]
-        if root:
-            try:
-                _record_root_installed_mod(mod)
-            except Exception as e:
-                logger.opt(exception=e).debug(
-                    f"Failed to record root mod '{mod.name}'."
-                )
-                issues.append(
-                    OperationIssue(
-                        severity=IssueSeverity.ERROR,
-                        kind=IssueKind.FILESYSTEM_ERROR,
-                        operation="record root mod",
-                        subject=mod.name,
-                        detail=str(e),
-                    )
-                )
-                return EnsureModResult(None, EnsureModStatus.FAILED, issues)
         return EnsureModResult(mod, EnsureModStatus.ALREADY_EXISTS, issues)
 
     if mod_info is _MOD_INFO_UNSET:
@@ -2151,22 +1587,6 @@ def ensure_mod(
     if mod is None:
         return EnsureModResult(None, EnsureModStatus.FAILED, issues)
     scan_result.mods.append(mod)
-
-    if root:
-        try:
-            _record_root_installed_mod(mod)
-        except Exception as e:
-            logger.opt(exception=e).debug(f"Failed to record root mod '{mod.name}'.")
-            issues.append(
-                OperationIssue(
-                    severity=IssueSeverity.ERROR,
-                    kind=IssueKind.FILESYSTEM_ERROR,
-                    operation="record root mod",
-                    subject=mod.name,
-                    detail=str(e),
-                )
-            )
-            return EnsureModResult(None, EnsureModStatus.FAILED, issues)
     return EnsureModResult(mod, EnsureModStatus.INSTALLED, issues)
 
 
@@ -2191,7 +1611,6 @@ def update_mod(mod: Mod, mod_info: ModInfo | None = None) -> UpdateModResult:
     """Update a mod and retain structured failure details."""
     issues = []
     try:
-        root_mods = get_root_mods()
         if mod_info is None:
             try:
                 mod_info = get_mod_info(mod.name)
@@ -2273,10 +1692,6 @@ def update_mod(mod: Mod, mod_info: ModInfo | None = None) -> UpdateModResult:
                 )
         if updated_mod.filepath != mod.filepath:
             os.remove(mod.filepath)
-        for root_mod in root_mods:
-            if root_mod.name == mod.name:
-                _record_root_installed_mod(updated_mod)
-                break
         return UpdateModResult(updated_mod, UpdateModStatus.UPDATED, issues)
     except OSError as e:
         issues.append(
