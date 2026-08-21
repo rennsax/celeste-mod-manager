@@ -2,6 +2,7 @@ import os
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.request
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -16,6 +17,7 @@ from rich.progress import BarColumn, Progress, TextColumn
 from . import config
 from .mod import Mod
 from .mod_db import ModInfo, get_mod_info
+from .operation import IssueKind, IssueSeverity, OperationIssue, has_errors
 
 _DOWNLOAD_MAX_ATTEMPTS = 3
 _DOWNLOAD_PROGRESS_WIDTH = 30
@@ -23,16 +25,28 @@ _XXHASH64_HEXDIGEST_LENGTH = 16
 _XXHASH_READ_CHUNK_SIZE = 1024 * 1024
 
 
-class ModChecksumError(Exception):
-    """Raised after a database checksum is unavailable or does not match."""
+@dataclass
+class DownloadResult:
+    mod: Mod | None = None
+    issues: list[OperationIssue] = field(default_factory=list)
 
-    def __init__(self, mod_name: str):
-        super().__init__(f"checksum validation failed for mod '{mod_name}'")
-        self.mod_name = mod_name
+    @property
+    def ok(self) -> bool:
+        return self.mod is not None and not has_errors(self.issues)
 
 
-class ModArchiveValidationError(Exception):
-    """Raised when a verified download is not a safe, valid mod archive."""
+@dataclass
+class LocalModScanResult:
+    mods: list[Mod] = field(default_factory=list)
+    issues: list[OperationIssue] = field(default_factory=list)
+
+    @property
+    def invalid_filenames(self) -> set[str]:
+        return {
+            issue.subject
+            for issue in self.issues
+            if issue.kind == IssueKind.LOCAL_MOD_INVALID
+        }
 
 
 def _normalize_xxhash(value: object) -> str | None:
@@ -72,14 +86,18 @@ def _calculate_xxhash64(filepath: str) -> str:
     return checksum.hexdigest().lower()
 
 
-def _raise_missing_expected_xxhash(mod_name: str) -> None:
-    print(
-        f"ERROR: cannot verify mod '{mod_name}' because the local database "
-        "does not contain a valid expected xxHash. Run "
-        "'celeste-mod-manager update-db' and retry.",
-        file=sys.stderr,
+def _missing_expected_xxhash_issue(mod_name: str) -> OperationIssue:
+    return OperationIssue(
+        severity=IssueSeverity.ERROR,
+        kind=IssueKind.CHECKSUM_FAILED,
+        operation="checksum validation",
+        subject=mod_name,
+        detail=(
+            f"cannot verify mod '{mod_name}' because the local database does not "
+            "contain a valid expected xxHash"
+        ),
+        hint="Run 'celeste-mod-manager update-db' and retry.",
     )
-    raise ModChecksumError(mod_name)
 
 
 def _format_size(num_bytes: int | float | None) -> str:
@@ -151,36 +169,90 @@ def _download_progress(expected_size: int | None = None):
         yield reporthook
 
 
-def _download_mod(mod_info: ModInfo) -> Mod | None:
+def _download_mod(mod_info: ModInfo) -> DownloadResult:
     if not mod_info or not mod_info.submissionFile:
-        logger.critical("Invalid mod info provided for download.")
-        sys.exit(1)
+        return DownloadResult(
+            issues=[
+                OperationIssue(
+                    severity=IssueSeverity.ERROR,
+                    kind=IssueKind.UNEXPECTED,
+                    operation="download",
+                    subject=getattr(mod_info, "name", "unknown"),
+                    detail="invalid mod information provided for download",
+                )
+            ]
+        )
 
     expected_xxhash = _get_expected_download_xxhash(mod_info)
     if expected_xxhash is None:
-        _raise_missing_expected_xxhash(mod_info.name)
+        return DownloadResult(issues=[_missing_expected_xxhash_issue(mod_info.name)])
 
     url = mod_info.submissionFile.url
     requested_filename = f"{mod_info.name}-{mod_info.version}.zip"
 
-    os.makedirs(config.MODS_DIR, exist_ok=True)
+    try:
+        os.makedirs(config.MODS_DIR, exist_ok=True)
+    except OSError as e:
+        return DownloadResult(
+            issues=[
+                OperationIssue(
+                    severity=IssueSeverity.ERROR,
+                    kind=IssueKind.FILESYSTEM_ERROR,
+                    operation="prepare download directory",
+                    subject=mod_info.name,
+                    detail=str(e),
+                )
+            ]
+        )
 
     expected_size = mod_info.submissionFile.size
     print(f"Collecting {mod_info.name}")
     print(f"  Downloading {requested_filename} ({_format_size(expected_size)})")
     logger.debug(f"Downloading '{mod_info.name}' from '{url}'...")
     last_error: Exception | None = None
+    retryable_errors = (
+        urllib.error.URLError,
+        urllib.error.ContentTooShortError,
+        TimeoutError,
+        ConnectionError,
+    )
 
     for attempt in range(1, _DOWNLOAD_MAX_ATTEMPTS + 1):
         temporary_filepath: str | None = None
 
         try:
-            fd, temporary_filepath = tempfile.mkstemp(
-                prefix=f".{requested_filename}.",
-                suffix=".download.zip",
-                dir=config.MODS_DIR,
-            )
-            os.close(fd)
+            try:
+                fd, temporary_filepath = tempfile.mkstemp(
+                    prefix=f".{requested_filename}.",
+                    suffix=".download.zip",
+                    dir=config.MODS_DIR,
+                )
+            except OSError as e:
+                return DownloadResult(
+                    issues=[
+                        OperationIssue(
+                            severity=IssueSeverity.ERROR,
+                            kind=IssueKind.FILESYSTEM_ERROR,
+                            operation="create temporary download",
+                            subject=mod_info.name,
+                            detail=str(e),
+                        )
+                    ]
+                )
+            try:
+                os.close(fd)
+            except OSError as e:
+                return DownloadResult(
+                    issues=[
+                        OperationIssue(
+                            severity=IssueSeverity.ERROR,
+                            kind=IssueKind.FILESYSTEM_ERROR,
+                            operation="create temporary download",
+                            subject=mod_info.name,
+                            detail=str(e),
+                        )
+                    ]
+                )
             temporary_filename = os.path.basename(temporary_filepath)
             try:
                 with _download_progress(expected_size) as reporthook:
@@ -189,55 +261,161 @@ def _download_mod(mod_info: ModInfo) -> Mod | None:
                         temporary_filepath,
                         reporthook=reporthook,
                     )
-            except Exception as e:
+            except retryable_errors as e:
                 last_error = e
                 logger.warning(
                     f"Download attempt {attempt}/{_DOWNLOAD_MAX_ATTEMPTS} "
                     f"for '{requested_filename}' failed: {e}"
                 )
                 continue
-
-            actual_xxhash = _calculate_xxhash64(temporary_filepath)
-            if actual_xxhash != expected_xxhash:
-                print(
-                    f"ERROR: file integrity check failed for mod '{mod_info.name}': "
-                    f"expected xxHash '{expected_xxhash}', got '{actual_xxhash}'. Run "
-                    "'celeste-mod-manager update-db' and retry.",
-                    file=sys.stderr,
+            except OSError as e:
+                return DownloadResult(
+                    issues=[
+                        OperationIssue(
+                            severity=IssueSeverity.ERROR,
+                            kind=IssueKind.FILESYSTEM_ERROR,
+                            operation="write temporary download",
+                            subject=mod_info.name,
+                            detail=str(e),
+                        )
+                    ]
                 )
-                raise ModChecksumError(mod_info.name)
+            except Exception as e:
+                logger.opt(exception=e).debug(
+                    f"Unexpected failure while downloading '{mod_info.name}'."
+                )
+                return DownloadResult(
+                    issues=[
+                        OperationIssue(
+                            severity=IssueSeverity.ERROR,
+                            kind=IssueKind.UNEXPECTED,
+                            operation="download",
+                            subject=mod_info.name,
+                            detail=str(e),
+                        )
+                    ]
+                )
 
-            mod = Mod.from_filename(temporary_filename)
-            if not mod:
-                raise ModArchiveValidationError(
-                    f"downloaded file for '{mod_info.name}' is not a valid mod archive"
+            try:
+                actual_xxhash = _calculate_xxhash64(temporary_filepath)
+            except OSError as e:
+                return DownloadResult(
+                    issues=[
+                        OperationIssue(
+                            severity=IssueSeverity.ERROR,
+                            kind=IssueKind.FILESYSTEM_ERROR,
+                            operation="read downloaded archive",
+                            subject=mod_info.name,
+                            detail=str(e),
+                        )
+                    ]
+                )
+            if actual_xxhash != expected_xxhash:
+                return DownloadResult(
+                    issues=[
+                        OperationIssue(
+                            severity=IssueSeverity.ERROR,
+                            kind=IssueKind.CHECKSUM_FAILED,
+                            operation="checksum validation",
+                            subject=mod_info.name,
+                            detail=(
+                                f"file integrity check failed for mod '{mod_info.name}': "
+                                f"expected xxHash '{expected_xxhash}', got '{actual_xxhash}'"
+                            ),
+                            hint="Run 'celeste-mod-manager update-db' and retry.",
+                        )
+                    ]
+                )
+
+            load_result = Mod.load_from_filename(temporary_filename)
+            mod = load_result.mod
+            if mod is None:
+                detail = (
+                    load_result.issues[0].detail
+                    if load_result.issues
+                    else "not a valid mod archive"
+                )
+                return DownloadResult(
+                    issues=[
+                        OperationIssue(
+                            severity=IssueSeverity.ERROR,
+                            kind=IssueKind.ARCHIVE_INVALID,
+                            operation="archive validation",
+                            subject=mod_info.name,
+                            detail=f"downloaded archive is invalid: {detail}",
+                        )
+                    ]
                 )
             if mod.name != mod_info.name:
-                raise ModArchiveValidationError(
-                    f"downloaded mod name mismatch: requested '{mod_info.name}', "
-                    f"archive contains '{mod.name}'"
+                return DownloadResult(
+                    issues=[
+                        OperationIssue(
+                            severity=IssueSeverity.ERROR,
+                            kind=IssueKind.ARCHIVE_INVALID,
+                            operation="archive validation",
+                            subject=mod_info.name,
+                            detail=(
+                                f"downloaded mod name mismatch: requested '{mod_info.name}', "
+                                f"archive contains '{mod.name}'"
+                            ),
+                        )
+                    ]
                 )
 
             filename = f"{mod.name}-{mod.version}.zip"
             if "/" in filename or "\\" in filename:
-                raise ModArchiveValidationError(
-                    f"downloaded mod metadata produces an unsafe filename: '{filename}'"
+                return DownloadResult(
+                    issues=[
+                        OperationIssue(
+                            severity=IssueSeverity.ERROR,
+                            kind=IssueKind.ARCHIVE_INVALID,
+                            operation="archive validation",
+                            subject=mod_info.name,
+                            detail=(
+                                "downloaded mod metadata produces an unsafe filename: "
+                                f"'{filename}'"
+                            ),
+                        )
+                    ]
                 )
             filepath = os.path.join(config.MODS_DIR, filename)
 
-            os.replace(temporary_filepath, filepath)
+            try:
+                os.replace(temporary_filepath, filepath)
+            except OSError as e:
+                return DownloadResult(
+                    issues=[
+                        OperationIssue(
+                            severity=IssueSeverity.ERROR,
+                            kind=IssueKind.FILESYSTEM_ERROR,
+                            operation="publish downloaded archive",
+                            subject=mod_info.name,
+                            detail=str(e),
+                        )
+                    ]
+                )
             mod.filepath = filepath
             print(f"  Saved {filename}")
             logger.debug(f"Downloaded '{filename}' successfully.")
+            issues = []
             if mod.version != mod_info.version:
-                print(
-                    f"WARNING: downloaded '{mod.name}' version {mod.version}, but "
-                    f"the local database reports version {mod_info.version}. Saved "
-                    f"the archive as '{filename}'. Run "
-                    "'celeste-mod-manager update-db' to refresh the local mod database.",
-                    file=sys.stderr,
+                issues.append(
+                    OperationIssue(
+                        severity=IssueSeverity.WARNING,
+                        kind=IssueKind.DATABASE_VERSION_MISMATCH,
+                        operation="archive validation",
+                        subject=mod.name,
+                        detail=(
+                            f"version {mod.version}, but the local database "
+                            f"reports version {mod_info.version}; saved as '{filename}'"
+                        ),
+                        hint=(
+                            "Run 'celeste-mod-manager update-db' to refresh the local "
+                            "mod database."
+                        ),
+                    )
                 )
-            return mod
+            return DownloadResult(mod=mod, issues=issues)
         finally:
             if temporary_filepath and os.path.exists(temporary_filepath):
                 try:
@@ -248,25 +426,56 @@ def _download_mod(mod_info: ModInfo) -> Mod | None:
                         f"'{temporary_filepath}': {e}"
                     )
 
-    logger.error(
-        f"Failed to download '{requested_filename}' after "
-        f"{_DOWNLOAD_MAX_ATTEMPTS} attempts: {last_error}"
+    return DownloadResult(
+        issues=[
+            OperationIssue(
+                severity=IssueSeverity.ERROR,
+                kind=IssueKind.DOWNLOAD_FAILED,
+                operation="download",
+                subject=mod_info.name,
+                detail=str(last_error) if last_error is not None else "unknown error",
+                attempts=_DOWNLOAD_MAX_ATTEMPTS,
+                retryable=True,
+            )
+        ]
     )
-    return None
 
 
-def get_installed_mods() -> list[Mod]:
+def scan_installed_mods() -> LocalModScanResult:
     if not os.path.exists(config.MODS_DIR):
-        return []
+        return LocalModScanResult()
+    try:
+        files = [f for f in os.listdir(config.MODS_DIR) if f != "Cache"]
+    except OSError as e:
+        return LocalModScanResult(
+            issues=[
+                OperationIssue(
+                    severity=IssueSeverity.ERROR,
+                    kind=IssueKind.FILESYSTEM_ERROR,
+                    operation="local mod scan",
+                    subject=config.MODS_DIR,
+                    detail=str(e),
+                )
+            ]
+        )
+
     mods = []
-    files = [f for f in os.listdir(config.MODS_DIR) if f != "Cache"]
+    issues = []
     for filename in files:
         filepath = os.path.join(config.MODS_DIR, filename)
         if os.path.isfile(filepath) and filename.lower().endswith(".zip"):
-            mod = Mod.from_filename(filename)
-            if mod:
-                mods.append(mod)
-    return mods
+            load_result = Mod.load_from_filename(filename)
+            issues.extend(load_result.issues)
+            if load_result.mod:
+                mods.append(load_result.mod)
+    return LocalModScanResult(
+        mods=mods,
+        issues=sorted(issues, key=lambda issue: issue.sort_key()),
+    )
+
+
+def get_installed_mods() -> list[Mod]:
+    return scan_installed_mods().mods
 
 
 def get_mod_dependency_closure(
@@ -366,91 +575,196 @@ def get_mods_exclusively_depending_on_closure(mod: Mod) -> list[Mod]:
     return result
 
 
+@dataclass
+class DependencyResolutionResult:
+    resolved: list[Mod] = field(default_factory=list)
+    issues: list[OperationIssue] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        return not has_errors(self.issues)
+
+
+@dataclass
+class DependencyResolutionContext:
+    available_by_name: dict[str, list[Mod]]
+    visited: set[str] = field(default_factory=set)
+    failures_by_name: dict[str, list[OperationIssue]] = field(default_factory=dict)
+
+    @classmethod
+    def from_mods(cls, mods: list[Mod]) -> "DependencyResolutionContext":
+        available_by_name: dict[str, list[Mod]] = {}
+        for available_mod in mods:
+            available_by_name.setdefault(available_mod.name, []).append(available_mod)
+        return cls(available_by_name=available_by_name)
+
+    def add_mod(self, mod: Mod) -> None:
+        self.available_by_name.setdefault(mod.name, []).append(mod)
+
+
 def resolve_deps(
     mod: Mod,
     optional: bool = False,
-    _visited: set | None = None,
-) -> tuple[list[Mod], list[str]]:
-    if _visited is None:
-        _visited = set()
+    *,
+    context: DependencyResolutionContext | None = None,
+    scan_result: LocalModScanResult | None = None,
+    dependency_chain: tuple[str, ...] | None = None,
+) -> DependencyResolutionResult:
+    issues = []
+    if context is None:
+        scan_result = scan_result or scan_installed_mods()
+        context = DependencyResolutionContext.from_mods(scan_result.mods)
+        issues.extend(scan_result.issues)
 
-    if mod.name in _visited:
-        return [], []
-    _visited.add(mod.name)
+    chain = dependency_chain or (mod.name,)
+    if mod.name in context.visited:
+        return DependencyResolutionResult(issues=issues)
+    context.visited.add(mod.name)
 
-    deps = mod.get_mod_deps(optional=optional)
+    try:
+        deps = mod.get_mod_deps(optional=optional)
+    except Exception as e:
+        logger.opt(exception=e).debug(
+            f"Unexpected failure while reading dependencies for '{mod.name}'."
+        )
+        issues.append(
+            OperationIssue(
+                severity=IssueSeverity.ERROR,
+                kind=IssueKind.UNEXPECTED,
+                operation="dependency resolution",
+                subject=mod.name,
+                detail=f"failed to read dependency metadata: {e}",
+                dependency_chain=chain,
+            )
+        )
+        return DependencyResolutionResult(issues=issues)
+
     resolved_deps = []
-    failed_deps = []
-
-    if not os.path.exists(config.MODS_DIR):
-        os.makedirs(config.MODS_DIR, exist_ok=True)
-
     for dep in deps:
-        dep_name = dep["Name"]
-        dep_version = dep["Version"]
+        dep_name = dep.get("Name")
+        dep_version = dep.get("Version")
+        if not dep_name or not dep_version:
+            issues.append(
+                OperationIssue(
+                    severity=IssueSeverity.ERROR,
+                    kind=IssueKind.ARCHIVE_INVALID,
+                    operation="dependency resolution",
+                    subject=mod.name,
+                    detail="dependency entry is missing Name or Version",
+                    dependency_chain=chain,
+                )
+            )
+            continue
 
+        dep_name = str(dep_name)
+        dep_version = str(dep_version)
         if dep_name in ["Everest", "Celeste", "EverestCore"]:
             logger.debug(f"Skipping dependency '{dep_name}' as it's a core component.")
             continue
-
-        if dep_name in _visited:
+        if dep_name in context.visited:
             continue
 
+        dep_chain = (*chain, dep_name)
         print(f"  Resolving dependency {dep_name} ({dep_version})")
-        installed_mods = get_installed_mods()
-        found_mods = [m for m in installed_mods if m.name == dep_name]
 
-        if len(found_mods) > 1:
-            logger.error(
-                f"Multiple mods found for dependency '{dep_name}': {found_mods}"
+        if dep_name in context.failures_by_name:
+            issues.extend(
+                issue.with_dependency_chain(dep_chain)
+                for issue in context.failures_by_name[dep_name]
             )
-            failed_deps.append(dep_name)
-        elif len(found_mods) == 1:
+            continue
+
+        found_mods = context.available_by_name.get(dep_name, [])
+        if len(found_mods) > 1:
+            issue = OperationIssue(
+                severity=IssueSeverity.ERROR,
+                kind=IssueKind.DUPLICATE_LOCAL_MOD,
+                operation="dependency resolution",
+                subject=dep_name,
+                detail=(", ".join(sorted(mod.get_filename() for mod in found_mods))),
+                dependency_chain=dep_chain,
+            )
+            issues.append(issue)
+            context.failures_by_name[dep_name] = [issue.with_dependency_chain(())]
+            continue
+
+        if found_mods:
             dep_mod = found_mods[0]
             print(
                 f"  Requirement already satisfied: {dep_mod.name} "
                 f"({dep_mod.version})"
             )
-            if dep_mod.version != dep_version:
-                logger.warning(
-                    f"Version mismatch for '{dep_name}': required {dep_version}, found {dep_mod.version}"
-                )
-            sub_resolved, sub_failed = resolve_deps(
-                dep_mod,
-                optional=optional,
-                _visited=_visited,
-            )
-            resolved_deps.extend(sub_resolved)
-            failed_deps.extend(sub_failed)
         else:
             print(f"  Downloading dependency {dep_name}")
-            logger.debug(
-                f"Dependency '{dep_name}' not found locally. Try to resolve..."
-            )
-            mod_info = get_mod_info(dep_name)
-            if not mod_info:
-                logger.error(f"Dependency '{dep_name}' not found in the database.")
-                failed_deps.append(dep_name)
-                continue
-            dep_mod = _download_mod(mod_info)
-            if dep_mod:
-                if dep_mod.version != dep_version:
-                    logger.warning(
-                        f"Version mismatch for downloaded '{dep_name}': required {dep_version}, got {dep_mod.version}"
-                    )
-                resolved_deps.append(dep_mod)
-                sub_resolved, sub_failed = resolve_deps(
-                    dep_mod,
-                    optional=optional,
-                    _visited=_visited,
+            try:
+                mod_info = get_mod_info(dep_name)
+            except Exception as e:
+                logger.opt(exception=e).debug(
+                    f"Failed to query the database for dependency '{dep_name}'."
                 )
-                resolved_deps.extend(sub_resolved)
-                failed_deps.extend(sub_failed)
-            else:
-                logger.error(f"Failed to download dependency '{dep_name}'.")
-                failed_deps.append(dep_name)
+                issue = OperationIssue(
+                    severity=IssueSeverity.ERROR,
+                    kind=IssueKind.DATABASE_UNAVAILABLE,
+                    operation="database lookup",
+                    subject=dep_name,
+                    detail=str(e),
+                    dependency_chain=dep_chain,
+                    retryable=True,
+                )
+                issues.append(issue)
+                context.failures_by_name[dep_name] = [issue.with_dependency_chain(())]
+                continue
+            if not mod_info:
+                issue = OperationIssue(
+                    severity=IssueSeverity.ERROR,
+                    kind=IssueKind.NOT_FOUND_IN_DB,
+                    operation="database lookup",
+                    subject=dep_name,
+                    detail="dependency was not found in the database",
+                    dependency_chain=dep_chain,
+                )
+                issues.append(issue)
+                context.failures_by_name[dep_name] = [issue.with_dependency_chain(())]
+                continue
 
-    return resolved_deps, failed_deps
+            download_result = _download_mod(mod_info)
+            issues.extend(
+                issue.with_dependency_chain(dep_chain)
+                for issue in download_result.issues
+            )
+            dep_mod = download_result.mod
+            if dep_mod is None:
+                context.failures_by_name[dep_name] = [
+                    issue.with_dependency_chain(())
+                    for issue in download_result.issues
+                    if issue.severity == IssueSeverity.ERROR
+                ]
+                continue
+            context.add_mod(dep_mod)
+            resolved_deps.append(dep_mod)
+
+        if dep_mod.version != dep_version:
+            issues.append(
+                OperationIssue(
+                    severity=IssueSeverity.WARNING,
+                    kind=IssueKind.VERSION_MISMATCH,
+                    operation="dependency resolution",
+                    subject=dep_name,
+                    detail=f"required {dep_version}, found {dep_mod.version}",
+                    dependency_chain=dep_chain,
+                )
+            )
+
+        sub_result = resolve_deps(
+            dep_mod,
+            optional=optional,
+            context=context,
+            dependency_chain=dep_chain,
+        )
+        resolved_deps.extend(sub_result.resolved)
+        issues.extend(sub_result.issues)
+
+    return DependencyResolutionResult(resolved=resolved_deps, issues=issues)
 
 
 def get_disabled_required_mods(mod: Mod, optional: bool = False) -> list[Mod]:
@@ -886,10 +1200,18 @@ def analyse_mod_deps(maxdepth: int, optional: bool = False, enabled_only: bool =
 class EnsureModStatus(Enum):
     INSTALLED = "installed"
     ALREADY_EXISTS = "already_exists"
-    NOT_FOUND_IN_DB = "not_found_in_db"
-    DOWNLOAD_FAILED = "download_failed"
-    CHECKSUM_FAILED = "checksum_failed"
-    UNEXPECTED = "unexpected"
+    FAILED = "failed"
+
+
+@dataclass
+class EnsureModResult:
+    mod: Mod | None
+    status: EnsureModStatus
+    issues: list[OperationIssue] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        return self.mod is not None and not has_errors(self.issues)
 
 
 def _get_installed_mods_record_path(for_write: bool = False) -> str:
@@ -1390,12 +1712,7 @@ def garbage_collect_mods(mods: list[Mod]) -> bool:
 
 class ApplyPlanStatus(Enum):
     READY = "ready"
-    EMPTY_REQUIREMENTS = "empty_requirements"
-    DUPLICATE_LOCAL_MOD = "duplicate_local_mod"
-    NOT_FOUND_IN_DB = "not_found_in_db"
-    DOWNLOAD_FAILED = "download_failed"
-    CHECKSUM_FAILED = "checksum_failed"
-    UNEXPECTED = "unexpected"
+    FAILED = "failed"
 
 
 @dataclass
@@ -1407,9 +1724,8 @@ class ApplyPlan:
     blacklisted: list[Mod] = field(default_factory=list)
     mod_options_order: list[str] = field(default_factory=list)
     would_download: list[str] = field(default_factory=list)
-    missing: list[str] = field(default_factory=list)
-    failed: list[str] = field(default_factory=list)
-    warnings: list[str] = field(default_factory=list)
+    issues: list[OperationIssue] = field(default_factory=list)
+    preserved_blacklist_filenames: set[str] = field(default_factory=set)
     status: ApplyPlanStatus = ApplyPlanStatus.READY
     dry_run: bool = False
 
@@ -1435,9 +1751,11 @@ def _sorted_unique_mods_by_name(mods_by_name: dict[str, Mod]) -> list[Mod]:
 
 
 def _build_apply_output_sets(
-    requested_names: list[str], optional: bool, plan: ApplyPlan
+    requested_names: list[str],
+    optional: bool,
+    plan: ApplyPlan,
+    installed_mods: list[Mod],
 ) -> None:
-    installed_mods = get_installed_mods()
     installed_dict = {mod.name: mod for mod in installed_mods}
 
     enabled_by_name: dict[str, Mod] = {}
@@ -1479,66 +1797,123 @@ def _build_mod_options_order_entries(
 
 
 def build_apply_plan(
-    required_names: list[str], optional: bool = False, dry_run: bool = False
+    required_names: list[str],
+    optional: bool = False,
+    dry_run: bool = False,
+    *,
+    scan_result: LocalModScanResult | None = None,
 ) -> ApplyPlan:
     requested_names = list(dict.fromkeys(required_names))
     requested_mod_names = [name for name in requested_names if name != "Everest"]
     plan = ApplyPlan(requested=requested_names, dry_run=dry_run)
     if not requested_names:
-        plan.status = ApplyPlanStatus.EMPTY_REQUIREMENTS
+        plan.status = ApplyPlanStatus.FAILED
+        plan.issues.append(
+            OperationIssue(
+                severity=IssueSeverity.ERROR,
+                kind=IssueKind.EMPTY_REQUIREMENTS,
+                operation="apply plan",
+                subject="requirements",
+                detail="no mods were requested",
+            )
+        )
         return plan
 
     try:
-        installed_mods = get_installed_mods()
-        duplicate_names = _find_duplicate_mod_names(installed_mods)
-        if duplicate_names:
-            plan.failed = duplicate_names
-            plan.status = ApplyPlanStatus.DUPLICATE_LOCAL_MOD
-            return plan
+        scan_result = scan_result or scan_installed_mods()
+        plan.issues.extend(scan_result.issues)
+        installed_mods = scan_result.mods
+        blacklisted_filenames = get_blacklisted_mod_filenames()
+        plan.preserved_blacklist_filenames = (
+            scan_result.invalid_filenames & blacklisted_filenames
+        )
 
-        installed_dict = {mod.name: mod for mod in installed_mods}
+        duplicate_names = _find_duplicate_mod_names(installed_mods)
+        duplicate_name_set = set(duplicate_names)
+        for duplicate_name in duplicate_names:
+            filenames = sorted(
+                mod.get_filename()
+                for mod in installed_mods
+                if mod.name == duplicate_name
+            )
+            plan.issues.append(
+                OperationIssue(
+                    severity=IssueSeverity.ERROR,
+                    kind=IssueKind.DUPLICATE_LOCAL_MOD,
+                    operation="apply plan",
+                    subject=duplicate_name,
+                    detail=(", ".join(filenames)),
+                )
+            )
+
+        installed_dict = {
+            mod.name: mod
+            for mod in installed_mods
+            if mod.name not in duplicate_name_set
+        }
         already_by_name: dict[str, Mod] = {}
         downloaded_by_name: dict[str, Mod] = {}
 
         for requested_name in requested_mod_names:
+            if requested_name in duplicate_name_set:
+                continue
             existing_mod = installed_dict.get(requested_name)
             if existing_mod:
                 already_by_name[requested_name] = existing_mod
                 continue
 
-            mod_info = get_mod_info(requested_name)
+            try:
+                mod_info = get_mod_info(requested_name)
+            except Exception as e:
+                logger.opt(exception=e).debug(
+                    f"Failed to query the database for mod '{requested_name}'."
+                )
+                plan.issues.append(
+                    OperationIssue(
+                        severity=IssueSeverity.ERROR,
+                        kind=IssueKind.DATABASE_UNAVAILABLE,
+                        operation="database lookup",
+                        subject=requested_name,
+                        detail=str(e),
+                        retryable=True,
+                    )
+                )
+                continue
             if not mod_info:
-                plan.missing.append(requested_name)
-                plan.status = ApplyPlanStatus.NOT_FOUND_IN_DB
+                plan.issues.append(
+                    OperationIssue(
+                        severity=IssueSeverity.ERROR,
+                        kind=IssueKind.NOT_FOUND_IN_DB,
+                        operation="database lookup",
+                        subject=requested_name,
+                        detail="mod was not found in the database",
+                    )
+                )
                 continue
 
             if dry_run:
                 plan.would_download.append(requested_name)
                 continue
 
-            downloaded_mod, ensure_status = ensure_mod(requested_name, root=False)
-            if not downloaded_mod:
-                plan.failed.append(requested_name)
-                if ensure_status == EnsureModStatus.NOT_FOUND_IN_DB:
-                    plan.missing.append(requested_name)
-                    plan.status = ApplyPlanStatus.NOT_FOUND_IN_DB
-                elif ensure_status == EnsureModStatus.CHECKSUM_FAILED:
-                    plan.status = ApplyPlanStatus.CHECKSUM_FAILED
-                elif ensure_status == EnsureModStatus.DOWNLOAD_FAILED:
-                    plan.status = ApplyPlanStatus.DOWNLOAD_FAILED
-                else:
-                    plan.status = ApplyPlanStatus.UNEXPECTED
+            ensure_result = ensure_mod(
+                requested_name,
+                root=False,
+                scan_result=LocalModScanResult(scan_result.mods),
+                mod_info=mod_info,
+            )
+            plan.issues.extend(ensure_result.issues)
+            downloaded_mod = ensure_result.mod
+            if downloaded_mod is None:
                 continue
-            if ensure_status == EnsureModStatus.INSTALLED:
+            if ensure_result.status == EnsureModStatus.INSTALLED:
                 downloaded_by_name[downloaded_mod.name] = downloaded_mod
+                plan.downloaded = _sorted_unique_mods_by_name(downloaded_by_name)
             else:
                 already_by_name[downloaded_mod.name] = downloaded_mod
             installed_dict[downloaded_mod.name] = downloaded_mod
 
-        if plan.status != ApplyPlanStatus.READY:
-            return plan
-
         root_mods = list(already_by_name.values()) + list(downloaded_by_name.values())
+        resolution_context = DependencyResolutionContext.from_mods(scan_result.mods)
         for root_mod in root_mods:
             if dry_run:
                 for dep in root_mod.get_mod_deps(optional=optional):
@@ -1550,40 +1925,83 @@ def build_apply_plan(
                     ):
                         continue
                     if dep_name not in plan.would_download:
-                        if get_mod_info(dep_name):
+                        try:
+                            dep_info = get_mod_info(dep_name)
+                        except Exception as e:
+                            logger.opt(exception=e).debug(
+                                f"Failed to query the database for dependency '{dep_name}'."
+                            )
+                            plan.issues.append(
+                                OperationIssue(
+                                    severity=IssueSeverity.ERROR,
+                                    kind=IssueKind.DATABASE_UNAVAILABLE,
+                                    operation="database lookup",
+                                    subject=dep_name,
+                                    detail=str(e),
+                                    dependency_chain=(root_mod.name, dep_name),
+                                    retryable=True,
+                                )
+                            )
+                            continue
+                        if dep_info:
                             plan.would_download.append(dep_name)
                         else:
-                            plan.missing.append(dep_name)
-                            plan.status = ApplyPlanStatus.NOT_FOUND_IN_DB
-                if plan.status != ApplyPlanStatus.READY:
-                    return plan
+                            plan.issues.append(
+                                OperationIssue(
+                                    severity=IssueSeverity.ERROR,
+                                    kind=IssueKind.NOT_FOUND_IN_DB,
+                                    operation="database lookup",
+                                    subject=dep_name,
+                                    detail="dependency was not found in the database",
+                                    dependency_chain=(root_mod.name, dep_name),
+                                )
+                            )
                 continue
 
-            resolved_deps, failed_deps = resolve_deps(root_mod, optional=optional)
-            for dep_mod in resolved_deps:
+            resolution_result = resolve_deps(
+                root_mod,
+                optional=optional,
+                context=resolution_context,
+            )
+            plan.issues.extend(resolution_result.issues)
+            for dep_mod in resolution_result.resolved:
                 downloaded_by_name[dep_mod.name] = dep_mod
-            if failed_deps:
-                plan.failed.extend(failed_deps)
-                plan.status = ApplyPlanStatus.DOWNLOAD_FAILED
-                return plan
+                if dep_mod not in scan_result.mods:
+                    scan_result.mods.append(dep_mod)
+            plan.downloaded = _sorted_unique_mods_by_name(downloaded_by_name)
 
         plan.already_available = _sorted_unique_mods_by_name(already_by_name)
         plan.downloaded = _sorted_unique_mods_by_name(downloaded_by_name)
-        installed_mods = get_installed_mods()
+        plan.issues = sorted(set(plan.issues), key=lambda issue: issue.sort_key())
+        if has_errors(plan.issues):
+            plan.status = ApplyPlanStatus.FAILED
+            return plan
+
+        installed_mods = scan_result.mods
         installed_dict = {mod.name: mod for mod in installed_mods}
         plan.mod_options_order = _build_mod_options_order_entries(
             requested_names, installed_dict
         )
-        _build_apply_output_sets(requested_mod_names, optional, plan)
-        return plan
-    except ModChecksumError as e:
-        if e.mod_name not in plan.failed:
-            plan.failed.append(e.mod_name)
-        plan.status = ApplyPlanStatus.CHECKSUM_FAILED
+        _build_apply_output_sets(
+            requested_mod_names,
+            optional,
+            plan,
+            installed_mods,
+        )
         return plan
     except Exception as e:
-        logger.error(f"Failed to build apply plan: {e}")
-        plan.status = ApplyPlanStatus.UNEXPECTED
+        logger.opt(exception=e).debug("Failed to build apply plan.")
+        plan.issues.append(
+            OperationIssue(
+                severity=IssueSeverity.ERROR,
+                kind=IssueKind.UNEXPECTED,
+                operation="apply plan",
+                subject="requirements",
+                detail=str(e),
+            )
+        )
+        plan.issues = sorted(set(plan.issues), key=lambda issue: issue.sort_key())
+        plan.status = ApplyPlanStatus.FAILED
         return plan
 
 
@@ -1591,7 +2009,10 @@ def apply_required_mods(plan: ApplyPlan) -> bool:
     if plan.status != ApplyPlanStatus.READY:
         return False
     try:
-        _replace_blacklist_filenames({mod.get_filename() for mod in plan.blacklisted})
+        _replace_blacklist_filenames(
+            {mod.get_filename() for mod in plan.blacklisted}
+            | plan.preserved_blacklist_filenames
+        )
         _replace_mod_options_order_entries(plan.mod_options_order)
         return True
     except Exception as e:
@@ -1645,93 +2066,210 @@ def uninstall_mods(mods: list[Mod]) -> bool:
         return False
 
 
-def ensure_mod(mod_name: str, root: bool = False) -> tuple[Mod | None, EnsureModStatus]:
-    """Ensure that a mod with the given name is installed. If it's already installed, return it. If not, try to download and install it. If root is True, also record it as a root mod."""
-    try:
-        mods = get_installed_mods()
-        for mod in mods:
-            if mod.name == mod_name:
-                if root:
-                    try:
-                        _record_root_installed_mod(mod)
-                    except Exception as e:
-                        logger.error(f"Failed to record root mod '{mod.name}': {e}")
-                        raise e
-                return mod, EnsureModStatus.ALREADY_EXISTS
+_MOD_INFO_UNSET = object()
 
-        mod_info = get_mod_info(mod_name)
-        if not mod_info:
-            logger.info(f"Mod '{mod_name}' not found in the database.")
-            return None, EnsureModStatus.NOT_FOUND_IN_DB
 
-        mod = _download_mod(mod_info)
-        if mod is None:
-            return None, EnsureModStatus.DOWNLOAD_FAILED
+def ensure_mod(
+    mod_name: str,
+    root: bool = False,
+    *,
+    scan_result: LocalModScanResult | None = None,
+    mod_info: ModInfo | None | object = _MOD_INFO_UNSET,
+) -> EnsureModResult:
+    """Ensure that a mod is installed and retain structured failure details."""
+    scan_result = scan_result or scan_installed_mods()
+    issues = list(scan_result.issues)
+    if has_errors(issues):
+        return EnsureModResult(None, EnsureModStatus.FAILED, issues)
+
+    found_mods = [mod for mod in scan_result.mods if mod.name == mod_name]
+    if len(found_mods) > 1:
+        issues.append(
+            OperationIssue(
+                severity=IssueSeverity.ERROR,
+                kind=IssueKind.DUPLICATE_LOCAL_MOD,
+                operation="install",
+                subject=mod_name,
+                detail=", ".join(sorted(mod.get_filename() for mod in found_mods)),
+            )
+        )
+        return EnsureModResult(None, EnsureModStatus.FAILED, issues)
+    if found_mods:
+        mod = found_mods[0]
         if root:
             try:
                 _record_root_installed_mod(mod)
             except Exception as e:
-                logger.error(f"Failed to record root mod '{mod.name}': {e}")
-                raise e
-        return mod, EnsureModStatus.INSTALLED
-    except ModChecksumError:
-        return None, EnsureModStatus.CHECKSUM_FAILED
-    except Exception as e:
-        logger.error(f"Failed to ensure mod '{mod_name}': {e}")
-        return None, EnsureModStatus.UNEXPECTED
+                logger.opt(exception=e).debug(
+                    f"Failed to record root mod '{mod.name}'."
+                )
+                issues.append(
+                    OperationIssue(
+                        severity=IssueSeverity.ERROR,
+                        kind=IssueKind.FILESYSTEM_ERROR,
+                        operation="record root mod",
+                        subject=mod.name,
+                        detail=str(e),
+                    )
+                )
+                return EnsureModResult(None, EnsureModStatus.FAILED, issues)
+        return EnsureModResult(mod, EnsureModStatus.ALREADY_EXISTS, issues)
+
+    if mod_info is _MOD_INFO_UNSET:
+        try:
+            mod_info = get_mod_info(mod_name)
+        except Exception as e:
+            logger.opt(exception=e).debug(
+                f"Failed to query the database for mod '{mod_name}'."
+            )
+            issues.append(
+                OperationIssue(
+                    severity=IssueSeverity.ERROR,
+                    kind=IssueKind.DATABASE_UNAVAILABLE,
+                    operation="database lookup",
+                    subject=mod_name,
+                    detail=str(e),
+                    retryable=True,
+                )
+            )
+            return EnsureModResult(None, EnsureModStatus.FAILED, issues)
+    if not mod_info:
+        issues.append(
+            OperationIssue(
+                severity=IssueSeverity.ERROR,
+                kind=IssueKind.NOT_FOUND_IN_DB,
+                operation="database lookup",
+                subject=mod_name,
+                detail="mod was not found in the database",
+            )
+        )
+        return EnsureModResult(None, EnsureModStatus.FAILED, issues)
+
+    download_result = _download_mod(mod_info)
+    issues.extend(download_result.issues)
+    mod = download_result.mod
+    if mod is None:
+        return EnsureModResult(None, EnsureModStatus.FAILED, issues)
+    scan_result.mods.append(mod)
+
+    if root:
+        try:
+            _record_root_installed_mod(mod)
+        except Exception as e:
+            logger.opt(exception=e).debug(f"Failed to record root mod '{mod.name}'.")
+            issues.append(
+                OperationIssue(
+                    severity=IssueSeverity.ERROR,
+                    kind=IssueKind.FILESYSTEM_ERROR,
+                    operation="record root mod",
+                    subject=mod.name,
+                    detail=str(e),
+                )
+            )
+            return EnsureModResult(None, EnsureModStatus.FAILED, issues)
+    return EnsureModResult(mod, EnsureModStatus.INSTALLED, issues)
 
 
 class UpdateModStatus(Enum):
     UPDATED = "updated"
     ALREADY_UP_TO_DATE = "already_up_to_date"
-    DOWNLOAD_FAILED = "download_failed"
-    CHECKSUM_FAILED = "checksum_failed"
-    UNEXPECTED = "unexpected"
+    FAILED = "failed"
 
 
-def update_mod(
-    mod: Mod, mod_info: ModInfo | None = None
-) -> tuple[Mod | None, UpdateModStatus]:
-    """Check if there's an update for the given mod. If there is, download and install it. Return the updated mod (or the original mod if it's already up to date) and the status."""
-    root_mods = get_root_mods()
+@dataclass
+class UpdateModResult:
+    mod: Mod | None
+    status: UpdateModStatus
+    issues: list[OperationIssue] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        return self.mod is not None and not has_errors(self.issues)
+
+
+def update_mod(mod: Mod, mod_info: ModInfo | None = None) -> UpdateModResult:
+    """Update a mod and retain structured failure details."""
+    issues = []
     try:
+        root_mods = get_root_mods()
         if mod_info is None:
-            mod_info = get_mod_info(mod.name)
+            try:
+                mod_info = get_mod_info(mod.name)
+            except Exception as e:
+                logger.opt(exception=e).debug(
+                    f"Failed to query the database for mod '{mod.name}'."
+                )
+                issues.append(
+                    OperationIssue(
+                        severity=IssueSeverity.ERROR,
+                        kind=IssueKind.DATABASE_UNAVAILABLE,
+                        operation="database lookup",
+                        subject=mod.name,
+                        detail=str(e),
+                        retryable=True,
+                    )
+                )
+                return UpdateModResult(None, UpdateModStatus.FAILED, issues)
         if not mod_info:
-            logger.info(f"Mod '{mod.name}' not found in the database.")
-            return None, UpdateModStatus.UNEXPECTED
+            issues.append(
+                OperationIssue(
+                    severity=IssueSeverity.ERROR,
+                    kind=IssueKind.NOT_FOUND_IN_DB,
+                    operation="database lookup",
+                    subject=mod.name,
+                    detail="mod was not found in the database",
+                )
+            )
+            return UpdateModResult(None, UpdateModStatus.FAILED, issues)
 
         valid_xxhashes = _get_valid_mod_xxhashes(mod_info)
         if not valid_xxhashes:
-            _raise_missing_expected_xxhash(mod.name)
+            issues.append(_missing_expected_xxhash_issue(mod.name))
+            return UpdateModResult(None, UpdateModStatus.FAILED, issues)
 
         current_xxhash = _calculate_xxhash64(mod.filepath)
         if current_xxhash in valid_xxhashes:
-            return mod, UpdateModStatus.ALREADY_UP_TO_DATE
+            return UpdateModResult(mod, UpdateModStatus.ALREADY_UP_TO_DATE, issues)
 
-        updated_mod = _download_mod(mod_info)
+        download_result = _download_mod(mod_info)
+        issues.extend(download_result.issues)
+        updated_mod = download_result.mod
         if updated_mod is None:
-            return None, UpdateModStatus.DOWNLOAD_FAILED
+            return UpdateModResult(None, UpdateModStatus.FAILED, issues)
         if updated_mod.get_filename() != mod.get_filename():
             try:
                 _replace_blacklist_filename(
                     mod.get_filename(), updated_mod.get_filename()
                 )
             except Exception as e:
-                print(
-                    f"WARNING: failed to update blacklist from "
-                    f"'{mod.get_filename()}' to '{updated_mod.get_filename()}': {e}.",
-                    file=sys.stderr,
+                issues.append(
+                    OperationIssue(
+                        severity=IssueSeverity.WARNING,
+                        kind=IssueKind.FILESYSTEM_ERROR,
+                        operation="update blacklist",
+                        subject=mod.name,
+                        detail=(
+                            f"failed to replace '{mod.get_filename()}' with "
+                            f"'{updated_mod.get_filename()}': {e}"
+                        ),
+                    )
                 )
             try:
                 _replace_mod_options_order_filename(
                     mod.get_filename(), updated_mod.get_filename()
                 )
             except Exception as e:
-                print(
-                    f"WARNING: failed to update mod options order from "
-                    f"'{mod.get_filename()}' to '{updated_mod.get_filename()}': {e}.",
-                    file=sys.stderr,
+                issues.append(
+                    OperationIssue(
+                        severity=IssueSeverity.WARNING,
+                        kind=IssueKind.FILESYSTEM_ERROR,
+                        operation="update mod options order",
+                        subject=mod.name,
+                        detail=(
+                            f"failed to replace '{mod.get_filename()}' with "
+                            f"'{updated_mod.get_filename()}': {e}"
+                        ),
+                    )
                 )
         if updated_mod.filepath != mod.filepath:
             os.remove(mod.filepath)
@@ -1739,9 +2277,27 @@ def update_mod(
             if root_mod.name == mod.name:
                 _record_root_installed_mod(updated_mod)
                 break
-        return updated_mod, UpdateModStatus.UPDATED
-    except ModChecksumError:
-        return None, UpdateModStatus.CHECKSUM_FAILED
+        return UpdateModResult(updated_mod, UpdateModStatus.UPDATED, issues)
+    except OSError as e:
+        issues.append(
+            OperationIssue(
+                severity=IssueSeverity.ERROR,
+                kind=IssueKind.FILESYSTEM_ERROR,
+                operation="update mod",
+                subject=mod.name,
+                detail=str(e),
+            )
+        )
+        return UpdateModResult(None, UpdateModStatus.FAILED, issues)
     except Exception as e:
-        logger.error(f"Failed to update mod '{mod.name}': {e}")
-        return None, UpdateModStatus.UNEXPECTED
+        logger.opt(exception=e).debug(f"Failed to update mod '{mod.name}'.")
+        issues.append(
+            OperationIssue(
+                severity=IssueSeverity.ERROR,
+                kind=IssueKind.UNEXPECTED,
+                operation="update mod",
+                subject=mod.name,
+                detail=str(e),
+            )
+        )
+        return UpdateModResult(None, UpdateModStatus.FAILED, issues)

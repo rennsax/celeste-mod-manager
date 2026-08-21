@@ -85,7 +85,12 @@ def _parse_global_args(args: list[str]) -> tuple[list[str], GlobalOptions, bool]
     return args[i:], options, False
 
 
-def main():
+def _configure_logger(level: str) -> None:
+    logger.remove()
+    logger.add(sys.stderr, level=level)
+
+
+def _run_cli() -> int:
     cli = CelesteModCLI()
 
     # Dispatch
@@ -104,8 +109,7 @@ def main():
         cmd_help()
         return 0
 
-    logger.remove()
-    logger.add(sys.stderr, level=options.log_level)
+    _configure_logger(options.log_level)
 
     logger.debug(f"Global options: {options}, Remaining args: {args}")
 
@@ -132,7 +136,7 @@ def main():
         set_mod_paths(celeste_dir)
 
     if subcommand == "search":
-        cli.search(extra_args)
+        return cli.search(extra_args)
     elif subcommand == "list":
         return cli.list_mods(extra_args)
     elif subcommand == "list-tree":
@@ -161,6 +165,23 @@ def main():
         print(f"ERROR: unknown command '{subcommand}'", file=sys.stderr)
         print()
         cmd_help()
+        return 1
+
+
+def main() -> int:
+    try:
+        _configure_logger(config.DEFAULT_LOG_LEVEL)
+        return _run_cli()
+    except KeyboardInterrupt:
+        print("Cancelled by user.", file=sys.stderr)
+        return 130
+    except Exception as e:
+        logger.opt(exception=e).debug("Unhandled exception at CLI boundary.")
+        print(
+            "ERROR: an unexpected internal error occurred. "
+            "Re-run with --log-level DEBUG for details.",
+            file=sys.stderr,
+        )
         return 1
 
 

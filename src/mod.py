@@ -2,17 +2,34 @@ import os
 import sys
 import yaml
 import zipfile
+from dataclasses import dataclass
 from loguru import logger
 
 from . import config
+from .operation import IssueKind, IssueSeverity, OperationIssue
 
 
-def _load_mod_cfg(filepath: str) -> dict | None:
-    """Read the metadata from specified mod file. The file is expected to be a
-    zip file with the `everest.yml' / `everest.yaml' in the top.
+@dataclass
+class ModLoadResult:
+    mod: "Mod | None"
+    issues: list[OperationIssue]
 
-    Return None if fails to read.
-    """
+    @property
+    def ok(self) -> bool:
+        return self.mod is not None
+
+
+def _invalid_mod_issue(filename: str, detail: str) -> OperationIssue:
+    return OperationIssue(
+        severity=IssueSeverity.WARNING,
+        kind=IssueKind.LOCAL_MOD_INVALID,
+        operation="local mod scan",
+        subject=filename,
+        detail=detail,
+    )
+
+
+def _load_mod_cfg_detailed(filepath: str) -> tuple[dict | None, str | None]:
     try:
         with zipfile.ZipFile(filepath, "r") as zf:
             yaml_filename = next(
@@ -23,25 +40,36 @@ def _load_mod_cfg(filepath: str) -> dict | None:
                 ),
                 None,
             )
-            if yaml_filename:
-                with zf.open(yaml_filename) as f:
-                    data = yaml.safe_load(f)
-                    if (
-                        not isinstance(data, list)
-                        or not data
-                        or not isinstance(data[0], dict)
-                    ):
-                        logger.debug(
-                            f"Unexpected everest.yaml format in '{filepath}'."
-                        )
-                        return None
-                    return data[0]
-            else:
-                logger.debug("No everest.yaml found in '{filepath}'.")
-                return None
+            if yaml_filename is None:
+                return None, "missing everest.yaml or everest.yml"
+
+            with zf.open(yaml_filename) as f:
+                data = yaml.safe_load(f)
+            if not isinstance(data, list) or not data or not isinstance(data[0], dict):
+                return (
+                    None,
+                    "Everest metadata must be a non-empty list whose first entry is a mapping",
+                )
+            return data[0], None
+    except zipfile.BadZipFile as e:
+        return None, f"invalid ZIP archive: {e}"
+    except yaml.YAMLError as e:
+        return None, f"invalid Everest metadata: {e}"
+    except (OSError, UnicodeError) as e:
+        return None, f"failed to read archive: {e}"
     except Exception as e:
-        logger.debug(f"Failed to read from '{filepath}': {e}")
-        return None
+        logger.opt(exception=e).debug(f"Failed to read mod archive '{filepath}'.")
+        return None, f"unexpected archive error: {e}"
+
+
+def _load_mod_cfg(filepath: str) -> dict | None:
+    """Read the metadata from specified mod file. The file is expected to be a
+    zip file with the `everest.yml' / `everest.yaml' in the top.
+
+    Return None if fails to read.
+    """
+    cfg, _ = _load_mod_cfg_detailed(filepath)
+    return cfg
 
 
 # Represent a local mod.
@@ -57,7 +85,6 @@ class Mod:
 
     @staticmethod
     def from_filename(filename: str) -> "Mod | None":
-
         """
         From a ZIP-format mod file, initialize an internal mod structure.
 
@@ -90,6 +117,43 @@ class Mod:
             return None
 
         return Mod(name=str(name), version=str(version), filepath=filepath)
+
+    @staticmethod
+    def load_from_filename(filename: str) -> ModLoadResult:
+        filepath = os.path.join(config.MODS_DIR, filename)
+        if not os.path.exists(filepath):
+            return ModLoadResult(
+                None, [_invalid_mod_issue(filename, "file does not exist")]
+            )
+        if not os.path.isfile(filepath) or not filepath.lower().endswith(".zip"):
+            return ModLoadResult(None, [_invalid_mod_issue(filename, "not a ZIP file")])
+
+        cfg, error = _load_mod_cfg_detailed(filepath)
+        if cfg is None:
+            return ModLoadResult(
+                None,
+                [
+                    _invalid_mod_issue(
+                        filename, error or "failed to load Everest metadata"
+                    )
+                ],
+            )
+
+        name = cfg.get("Name")
+        version = cfg.get("Version")
+        if not name or not version:
+            return ModLoadResult(
+                None,
+                [
+                    _invalid_mod_issue(
+                        filename, "Everest metadata is missing Name or Version"
+                    )
+                ],
+            )
+
+        return ModLoadResult(
+            Mod(name=str(name), version=str(version), filepath=filepath), []
+        )
 
     def get_filename(self) -> str:
         return os.path.basename(self.filepath)

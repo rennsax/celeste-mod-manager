@@ -1,4 +1,3 @@
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -48,7 +47,7 @@ def _prepare_update(
         mod_zip_factory(mods_dir, new_filename, "Example", new_version)
         updated_mod = mod_manager.Mod.from_filename(new_filename)
         assert updated_mod is not None
-        return updated_mod
+        return mod_manager.DownloadResult(mod=updated_mod)
 
     monkeypatch.setattr(mod_manager, "_download_mod", fake_download_mod)
     return old_mod, old_filename, new_filename
@@ -71,7 +70,8 @@ def test_update_mod_replaces_blacklisted_archive_filenames_in_place(
         )
     )
 
-    updated_mod, status = mod_manager.update_mod(old_mod)
+    result = mod_manager.update_mod(old_mod)
+    updated_mod, status = result.mod, result.status
 
     assert status == mod_manager.UpdateModStatus.UPDATED
     assert updated_mod is not None
@@ -105,7 +105,8 @@ def test_update_mod_replaces_ordered_archive_filenames_in_place(
         )
     )
 
-    updated_mod, status = mod_manager.update_mod(old_mod)
+    result = mod_manager.update_mod(old_mod)
+    updated_mod, status = result.mod, result.status
 
     assert status == mod_manager.UpdateModStatus.UPDATED
     assert updated_mod is not None
@@ -128,7 +129,8 @@ def test_update_mod_does_not_create_missing_order_file(
         mods_dir, mod_zip_factory, monkeypatch
     )
 
-    updated_mod, status = mod_manager.update_mod(old_mod)
+    result = mod_manager.update_mod(old_mod)
+    updated_mod, status = result.mod, result.status
 
     assert status == mod_manager.UpdateModStatus.UPDATED
     assert updated_mod is not None
@@ -146,7 +148,8 @@ def test_update_mod_does_not_rewrite_order_without_old_filename(
     original_order = b"# User-maintained order\nOther.zip\nEverest\n"
     order_path.write_bytes(original_order)
 
-    updated_mod, status = mod_manager.update_mod(old_mod)
+    result = mod_manager.update_mod(old_mod)
+    updated_mod, status = result.mod, result.status
 
     assert status == mod_manager.UpdateModStatus.UPDATED
     assert updated_mod is not None
@@ -161,7 +164,8 @@ def test_update_mod_does_not_rewrite_blacklist_without_old_filename(
     original_blacklist = b"# User-maintained blacklist\nOther.zip\n"
     blacklist_path.write_bytes(original_blacklist)
 
-    updated_mod, status = mod_manager.update_mod(old_mod)
+    result = mod_manager.update_mod(old_mod)
+    updated_mod, status = result.mod, result.status
 
     assert status == mod_manager.UpdateModStatus.UPDATED
     assert updated_mod is not None
@@ -191,7 +195,8 @@ def test_update_mod_leaves_order_unchanged_without_an_update(
         ),
     )
 
-    updated_mod, status = mod_manager.update_mod(old_mod)
+    result = mod_manager.update_mod(old_mod)
+    updated_mod, status = result.mod, result.status
 
     assert status == mod_manager.UpdateModStatus.ALREADY_UP_TO_DATE
     assert updated_mod == old_mod
@@ -218,7 +223,8 @@ def test_update_mod_accepts_any_catalog_hash_for_installed_archive(
 
     monkeypatch.setattr(mod_manager, "_download_mod", fail_if_downloaded)
 
-    updated_mod, status = mod_manager.update_mod(installed_mod)
+    result = mod_manager.update_mod(installed_mod)
+    updated_mod, status = result.mod, result.status
 
     assert status == mod_manager.UpdateModStatus.ALREADY_UP_TO_DATE
     assert updated_mod == installed_mod
@@ -238,11 +244,14 @@ def test_update_mod_treats_hash_as_authoritative_over_version_order(
 
     def fake_download_mod(_mod_info):
         mod_zip_factory(mods_dir, new_filename, "Example", "1.1.0")
-        return mod_manager.Mod.from_filename(new_filename)
+        return mod_manager.DownloadResult(
+            mod=mod_manager.Mod.from_filename(new_filename)
+        )
 
     monkeypatch.setattr(mod_manager, "_download_mod", fake_download_mod)
 
-    updated_mod, status = mod_manager.update_mod(installed_mod)
+    result = mod_manager.update_mod(installed_mod)
+    updated_mod, status = result.mod, result.status
 
     assert status == mod_manager.UpdateModStatus.UPDATED
     assert updated_mod is not None
@@ -276,7 +285,8 @@ def test_update_mod_uses_downloaded_archive_version_when_database_is_stale(
 
     monkeypatch.setattr(mod_manager.urllib.request, "urlretrieve", fake_urlretrieve)
 
-    updated_mod, status = mod_manager.update_mod(installed_mod)
+    result = mod_manager.update_mod(installed_mod)
+    updated_mod, status = result.mod, result.status
 
     captured = capsys.readouterr()
     assert status == mod_manager.UpdateModStatus.UPDATED
@@ -291,8 +301,8 @@ def test_update_mod_uses_downloaded_archive_version_when_database_is_stale(
     assert (mods_dir / "modoptionsorder.txt").read_text(encoding="utf-8") == (
         f"{actual_filename}\n"
     )
-    assert "database reports version 1.1.0" in captured.err
-    assert "celeste-mod-manager update-db" in captured.err
+    assert captured.err == ""
+    assert result.issues[0].kind == mod_manager.IssueKind.DATABASE_VERSION_MISMATCH
 
 
 def test_update_mod_leaves_order_unchanged_when_download_fails(
@@ -305,12 +315,30 @@ def test_update_mod_leaves_order_unchanged_when_download_fails(
     blacklist_path = mods_dir / "blacklist.txt"
     original_blacklist = b"Example-1.0.0.zip\n"
     blacklist_path.write_bytes(original_blacklist)
-    monkeypatch.setattr(mod_manager, "_download_mod", lambda _mod_info: None)
+    monkeypatch.setattr(
+        mod_manager,
+        "_download_mod",
+        lambda _mod_info: mod_manager.DownloadResult(
+            issues=[
+                mod_manager.OperationIssue(
+                    severity=mod_manager.IssueSeverity.ERROR,
+                    kind=mod_manager.IssueKind.DOWNLOAD_FAILED,
+                    operation="download",
+                    subject="Example",
+                    detail="offline",
+                    attempts=3,
+                    retryable=True,
+                )
+            ]
+        ),
+    )
 
-    updated_mod, status = mod_manager.update_mod(old_mod)
+    result = mod_manager.update_mod(old_mod)
+    updated_mod, status = result.mod, result.status
 
     assert updated_mod is None
-    assert status == mod_manager.UpdateModStatus.DOWNLOAD_FAILED
+    assert status == mod_manager.UpdateModStatus.FAILED
+    assert result.issues[0].kind == mod_manager.IssueKind.DOWNLOAD_FAILED
     assert order_path.read_bytes() == original_order
     assert blacklist_path.read_bytes() == original_blacklist
 
@@ -331,11 +359,13 @@ def test_update_mod_reports_checksum_failure_separately(
 
     monkeypatch.setattr(mod_manager.urllib.request, "urlretrieve", fake_urlretrieve)
 
-    updated_mod, status = mod_manager.update_mod(old_mod)
+    result = mod_manager.update_mod(old_mod)
+    updated_mod, status = result.mod, result.status
 
     assert updated_mod is None
-    assert status == mod_manager.UpdateModStatus.CHECKSUM_FAILED
-    assert "file integrity check failed for mod 'Example'" in capsys.readouterr().err
+    assert status == mod_manager.UpdateModStatus.FAILED
+    assert result.issues[0].kind == mod_manager.IssueKind.CHECKSUM_FAILED
+    assert capsys.readouterr().err == ""
     assert (mods_dir / old_filename).exists()
     assert not list(mods_dir.glob("*.download.zip"))
 
@@ -358,11 +388,13 @@ def test_update_mod_requires_valid_catalog_hash_before_download(
 
     monkeypatch.setattr(mod_manager, "_download_mod", fail_if_downloaded)
 
-    updated_mod, status = mod_manager.update_mod(installed_mod)
+    result = mod_manager.update_mod(installed_mod)
+    updated_mod, status = result.mod, result.status
 
     assert updated_mod is None
-    assert status == mod_manager.UpdateModStatus.CHECKSUM_FAILED
-    assert "cannot verify mod 'Example'" in capsys.readouterr().err
+    assert status == mod_manager.UpdateModStatus.FAILED
+    assert result.issues[0].kind == mod_manager.IssueKind.CHECKSUM_FAILED
+    assert capsys.readouterr().err == ""
 
 
 def test_update_mod_warns_and_continues_when_blacklist_update_fails(
@@ -381,17 +413,17 @@ def test_update_mod_warns_and_continues_when_blacklist_update_fails(
         mod_manager, "_replace_blacklist_filename", fail_to_update_blacklist
     )
 
-    updated_mod, status = mod_manager.update_mod(old_mod)
+    result = mod_manager.update_mod(old_mod)
+    updated_mod, status = result.mod, result.status
 
     assert updated_mod is not None
     assert status == mod_manager.UpdateModStatus.UPDATED
     assert not (mods_dir / old_filename).exists()
     assert (mods_dir / new_filename).exists()
     assert order_path.read_text(encoding="utf-8") == f"{new_filename}\n"
-    assert capsys.readouterr().err == (
-        "WARNING: failed to update blacklist from "
-        f"'{old_filename}' to '{new_filename}': disk full.\n"
-    )
+    assert capsys.readouterr().err == ""
+    assert result.issues[-1].kind == mod_manager.IssueKind.FILESYSTEM_ERROR
+    assert result.issues[-1].severity == mod_manager.IssueSeverity.WARNING
 
 
 def test_update_mod_warns_and_continues_when_order_update_fails(
@@ -411,17 +443,17 @@ def test_update_mod_warns_and_continues_when_order_update_fails(
         mod_manager, "_replace_mod_options_order_filename", fail_to_update_order
     )
 
-    updated_mod, status = mod_manager.update_mod(old_mod)
+    result = mod_manager.update_mod(old_mod)
+    updated_mod, status = result.mod, result.status
 
     assert updated_mod is not None
     assert status == mod_manager.UpdateModStatus.UPDATED
     assert not (mods_dir / old_filename).exists()
     assert (mods_dir / new_filename).exists()
     assert order_path.read_bytes() == original_order
-    assert capsys.readouterr().err == (
-        "WARNING: failed to update mod options order from "
-        f"'{old_filename}' to '{new_filename}': disk full.\n"
-    )
+    assert capsys.readouterr().err == ""
+    assert result.issues[-1].kind == mod_manager.IssueKind.FILESYSTEM_ERROR
+    assert result.issues[-1].severity == mod_manager.IssueSeverity.WARNING
 
 
 def test_upgrade_cli_reports_already_up_to_date_as_success(
@@ -475,9 +507,20 @@ def test_upgrade_cli_reports_download_failure(
     monkeypatch.setattr(
         mod_manager,
         "update_mod",
-        lambda _mod, mod_info=None: (
+        lambda _mod, mod_info=None: mod_manager.UpdateModResult(
             None,
-            mod_manager.UpdateModStatus.DOWNLOAD_FAILED,
+            mod_manager.UpdateModStatus.FAILED,
+            [
+                mod_manager.OperationIssue(
+                    severity=mod_manager.IssueSeverity.ERROR,
+                    kind=mod_manager.IssueKind.DOWNLOAD_FAILED,
+                    operation="download",
+                    subject="Example",
+                    detail="offline",
+                    attempts=3,
+                    retryable=True,
+                )
+            ],
         ),
     )
     monkeypatch.setattr(
@@ -490,8 +533,10 @@ def test_upgrade_cli_reports_download_failure(
 
     captured = capsys.readouterr()
     assert exit_code == 1
-    assert captured.out == "ERROR: failed to download the update for mod 'Example'.\n"
-    assert captured.err == ""
+    assert captured.out == ""
+    assert captured.err == (
+        "ERROR: failed to download mod 'Example' after 3 attempts: offline.\n"
+    )
 
 
 def test_upgrade_cli_does_not_relabel_checksum_failure_as_download_failure(
@@ -505,12 +550,19 @@ def test_upgrade_cli_does_not_relabel_checksum_failure_as_download_failure(
     )
 
     def fake_update_mod(_mod, mod_info=None):
-        print(
-            "ERROR: file integrity check failed for mod 'Example'. Run "
-            "'celeste-mod-manager update-db' and retry.",
-            file=sys.stderr,
+        return mod_manager.UpdateModResult(
+            None,
+            mod_manager.UpdateModStatus.FAILED,
+            [
+                mod_manager.OperationIssue(
+                    severity=mod_manager.IssueSeverity.ERROR,
+                    kind=mod_manager.IssueKind.CHECKSUM_FAILED,
+                    operation="checksum validation",
+                    subject="Example",
+                    detail="file integrity check failed for mod 'Example'",
+                )
+            ],
         )
-        return None, mod_manager.UpdateModStatus.CHECKSUM_FAILED
 
     monkeypatch.setattr(mod_manager, "update_mod", fake_update_mod)
 
@@ -530,7 +582,9 @@ def test_upgrade_cli_handles_missing_mod_for_updated_status(
     monkeypatch.setattr(
         mod_manager,
         "update_mod",
-        lambda _mod, mod_info=None: (None, mod_manager.UpdateModStatus.UPDATED),
+        lambda _mod, mod_info=None: mod_manager.UpdateModResult(
+            None, mod_manager.UpdateModStatus.UPDATED
+        ),
     )
     monkeypatch.setattr(
         CelesteModCLI,
@@ -542,10 +596,8 @@ def test_upgrade_cli_handles_missing_mod_for_updated_status(
 
     captured = capsys.readouterr()
     assert exit_code == 1
-    assert captured.out == (
-        "ERROR: failed to update mod 'Example' due to an unexpected error.\n"
-    )
-    assert captured.err == ""
+    assert captured.out == ""
+    assert "update reported success without returning a mod" in captured.err
 
 
 def test_upgrade_all_must_be_the_only_argument(monkeypatch, capsys):
@@ -651,7 +703,9 @@ def test_upgrade_all_lists_and_updates_only_outdated_mods_in_name_order(
 
     def fake_update_mod(mod, mod_info=None):
         updated.append((mod, mod_info))
-        return mod, mod_manager.UpdateModStatus.ALREADY_UP_TO_DATE
+        return mod_manager.UpdateModResult(
+            mod, mod_manager.UpdateModStatus.ALREADY_UP_TO_DATE
+        )
 
     monkeypatch.setattr(mod_manager, "update_mod", fake_update_mod)
 
@@ -678,7 +732,10 @@ def test_upgrade_all_lists_and_updates_only_outdated_mods_in_name_order(
         "VersionMatch",
         "ZetaOutdated",
     ]
-    assert updated == [(alpha, alpha_info), (zeta, zeta_info)]
+    assert [(mod.name, info) for mod, info in updated] == [
+        (alpha.name, alpha_info),
+        (zeta.name, zeta_info),
+    ]
     assert prompts == ["Proceed? [y/N] "]
 
 
@@ -754,18 +811,33 @@ def test_upgrade_all_continues_after_a_failed_update(
     def fake_update_mod(mod, mod_info=None):
         updated_names.append(mod.name)
         if mod.name == "Alpha":
-            return None, mod_manager.UpdateModStatus.DOWNLOAD_FAILED
-        return mod, mod_manager.UpdateModStatus.ALREADY_UP_TO_DATE
+            return mod_manager.UpdateModResult(
+                None,
+                mod_manager.UpdateModStatus.FAILED,
+                [
+                    mod_manager.OperationIssue(
+                        severity=mod_manager.IssueSeverity.ERROR,
+                        kind=mod_manager.IssueKind.DOWNLOAD_FAILED,
+                        operation="download",
+                        subject="Alpha",
+                        detail="offline",
+                        attempts=3,
+                        retryable=True,
+                    )
+                ],
+            )
+        return mod_manager.UpdateModResult(
+            mod, mod_manager.UpdateModStatus.ALREADY_UP_TO_DATE
+        )
 
     monkeypatch.setattr(mod_manager, "update_mod", fake_update_mod)
 
     assert CelesteModCLI().upgrade(["ALL"]) == 1
 
-    output = capsys.readouterr().out
+    captured = capsys.readouterr()
     assert updated_names == ["Alpha", "Zeta"]
-    assert output.index("failed to download the update for mod 'Alpha'") < output.index(
-        "'Zeta' is already up to date."
-    )
+    assert "failed to download mod 'Alpha' after 3 attempts" in captured.err
+    assert "'Zeta' is already up to date." in captured.out
 
 
 def test_upgrade_all_aborts_when_update_blacklist_is_unreadable(

@@ -4,10 +4,9 @@ import urllib.error
 from pathlib import Path
 from types import SimpleNamespace
 
-import pytest
 import xxhash
 
-from src import mod_manager
+from src import main, mod_manager
 from src.cli import CelesteModCLI
 
 
@@ -53,7 +52,8 @@ def test_download_mod_prints_progress(
     monkeypatch.setattr(mod_manager.urllib.request, "urlretrieve", fake_urlretrieve)
     monkeypatch.setattr(mod_manager, "_calculate_xxhash64", lambda _path: "0" * 16)
 
-    mod = mod_manager._download_mod(_mod_info("DownloadedMod"))
+    result = mod_manager._download_mod(_mod_info("DownloadedMod"))
+    mod = result.mod
 
     output = capsys.readouterr().out
     assert mod is not None
@@ -123,7 +123,7 @@ def test_download_mod_retries_then_publishes_valid_archive(
         if reporthook:
             reporthook(1, 50, 100)
         if attempts == 1:
-            raise OSError("temporary network failure")
+            raise urllib.error.URLError("temporary network failure")
         if reporthook:
             reporthook(2, 50, 100)
         path = Path(filepath)
@@ -132,7 +132,8 @@ def test_download_mod_retries_then_publishes_valid_archive(
     monkeypatch.setattr(mod_manager.urllib.request, "urlretrieve", fake_urlretrieve)
     monkeypatch.setattr(mod_manager, "_calculate_xxhash64", lambda _path: "0" * 16)
 
-    mod = mod_manager._download_mod(_mod_info("DownloadedMod"))
+    result = mod_manager._download_mod(_mod_info("DownloadedMod"))
+    mod = result.mod
 
     assert attempts == 2
     assert mod is not None
@@ -159,12 +160,91 @@ def test_download_mod_retries_content_too_short(
     monkeypatch.setattr(mod_manager.urllib.request, "urlretrieve", fake_urlretrieve)
     monkeypatch.setattr(mod_manager, "_calculate_xxhash64", lambda _path: "0" * 16)
 
-    mod = mod_manager._download_mod(_mod_info("DownloadedMod"))
+    result = mod_manager._download_mod(_mod_info("DownloadedMod"))
+    mod = result.mod
 
     assert attempts == 2
     assert mod is not None
     assert (mods_dir / "DownloadedMod-1.0.0.zip").exists()
     assert not list(mods_dir.glob("*.download.zip"))
+
+
+def test_main_catches_download_interrupt_after_temporary_file_cleanup(
+    mods_dir: Path, monkeypatch, capsys
+):
+    def interrupt_download(url, filepath, reporthook=None):
+        assert Path(filepath).exists()
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(mod_manager.urllib.request, "urlretrieve", interrupt_download)
+    monkeypatch.setattr(
+        mod_manager, "get_mod_info", lambda _name: _mod_info("DownloadedMod")
+    )
+    monkeypatch.setattr(main, "get_celeste_dir", lambda: mods_dir.parent)
+    monkeypatch.setattr(main, "set_mod_paths", lambda _path: None)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["celeste-mod-manager", "install", "--no-deps", "DownloadedMod"],
+    )
+
+    assert main.main() == 130
+
+    captured = capsys.readouterr()
+    assert captured.err == "Cancelled by user.\n"
+    assert "Traceback" not in captured.out + captured.err
+    assert not list(mods_dir.glob("*.download.zip"))
+
+
+def test_install_reports_network_failure_once_after_retries(
+    mods_dir: Path, monkeypatch, capsys
+):
+    attempts = 0
+
+    def fake_urlretrieve(url, filepath, reporthook=None):
+        nonlocal attempts
+        attempts += 1
+        raise urllib.error.URLError("offline")
+
+    monkeypatch.setattr(mod_manager.urllib.request, "urlretrieve", fake_urlretrieve)
+    monkeypatch.setattr(
+        mod_manager, "get_mod_info", lambda _name: _mod_info("DownloadedMod")
+    )
+
+    assert not CelesteModCLI()._install_mod("DownloadedMod")
+
+    captured = capsys.readouterr()
+    assert attempts == 3
+    assert captured.err.count("failed to download mod 'DownloadedMod'") == 1
+    assert "after 3 attempts" in captured.err
+    assert "offline" in captured.err
+    assert "unexpected error" not in captured.err
+    assert not list(mods_dir.glob("*.download.zip"))
+
+
+def test_install_does_not_retry_local_download_write_error(
+    mods_dir: Path, monkeypatch, capsys
+):
+    attempts = 0
+
+    def fake_urlretrieve(url, filepath, reporthook=None):
+        nonlocal attempts
+        attempts += 1
+        raise OSError("disk full")
+
+    monkeypatch.setattr(mod_manager.urllib.request, "urlretrieve", fake_urlretrieve)
+    monkeypatch.setattr(
+        mod_manager, "get_mod_info", lambda _name: _mod_info("DownloadedMod")
+    )
+
+    assert not CelesteModCLI()._install_mod("DownloadedMod")
+
+    captured = capsys.readouterr()
+    assert attempts == 1
+    assert (
+        "write temporary download failed for 'DownloadedMod': disk full" in captured.err
+    )
+    assert "failed to download mod" not in captured.err
 
 
 def test_download_mod_rejects_invalid_archive_without_retry(
@@ -181,12 +261,13 @@ def test_download_mod_rejects_invalid_archive_without_retry(
 
     monkeypatch.setattr(mod_manager.urllib.request, "urlretrieve", fake_urlretrieve)
 
-    with pytest.raises(mod_manager.ModArchiveValidationError):
-        mod_manager._download_mod(
-            _mod_info("DownloadedMod", xx_hashes=[expected_xxhash])
-        )
+    result = mod_manager._download_mod(
+        _mod_info("DownloadedMod", xx_hashes=[expected_xxhash])
+    )
 
     assert attempts == 1
+    assert result.mod is None
+    assert result.issues[0].kind == mod_manager.IssueKind.ARCHIVE_INVALID
     assert not (mods_dir / "DownloadedMod-1.0.0.zip").exists()
     assert not list(mods_dir.glob("*.download.zip"))
 
@@ -198,13 +279,14 @@ def test_download_mod_failure_preserves_existing_archive(
     original_contents = (mods_dir / "DownloadedMod-1.0.0.zip").read_bytes()
 
     def fake_urlretrieve(url, filepath, reporthook=None):
-        raise OSError("temporary network failure")
+        raise urllib.error.URLError("temporary network failure")
 
     monkeypatch.setattr(mod_manager.urllib.request, "urlretrieve", fake_urlretrieve)
 
-    mod = mod_manager._download_mod(_mod_info("DownloadedMod"))
+    result = mod_manager._download_mod(_mod_info("DownloadedMod"))
 
-    assert mod is None
+    assert result.mod is None
+    assert result.issues[0].kind == mod_manager.IssueKind.DOWNLOAD_FAILED
     assert (mods_dir / "DownloadedMod-1.0.0.zip").read_bytes() == original_contents
     assert (
         mod_manager.Mod.from_filename("DownloadedMod-1.0.0.zip").name == "ExistingMod"
@@ -224,17 +306,15 @@ def test_download_mod_checksum_failure_does_not_retry(
 
     monkeypatch.setattr(mod_manager.urllib.request, "urlretrieve", fake_urlretrieve)
 
-    with pytest.raises(mod_manager.ModChecksumError):
-        mod_manager._download_mod(_mod_info("DownloadedMod"))
+    result = mod_manager._download_mod(_mod_info("DownloadedMod"))
 
     captured = capsys.readouterr()
     actual_xxhash = xxhash.xxh64(b"complete but unexpected contents").hexdigest()
     assert attempts == 1
-    assert captured.err == (
-        "ERROR: file integrity check failed for mod 'DownloadedMod': expected "
-        f"xxHash '{'0' * 16}', got '{actual_xxhash}'. Run "
-        "'celeste-mod-manager update-db' and retry.\n"
-    )
+    assert captured.err == ""
+    assert result.mod is None
+    assert result.issues[0].kind == mod_manager.IssueKind.CHECKSUM_FAILED
+    assert f"got '{actual_xxhash}'" in result.issues[0].detail
     assert not list(mods_dir.glob("*.download.zip"))
 
 
@@ -246,14 +326,12 @@ def test_download_mod_requires_primary_xxhash_before_network(
 
     monkeypatch.setattr(mod_manager.urllib.request, "urlretrieve", fail_if_downloaded)
 
-    with pytest.raises(mod_manager.ModChecksumError):
-        mod_manager._download_mod(_mod_info("DownloadedMod", xx_hashes=[]))
+    result = mod_manager._download_mod(_mod_info("DownloadedMod", xx_hashes=[]))
 
-    assert capsys.readouterr().err == (
-        "ERROR: cannot verify mod 'DownloadedMod' because the local database does "
-        "not contain a valid expected xxHash. Run 'celeste-mod-manager update-db' "
-        "and retry.\n"
-    )
+    assert capsys.readouterr().err == ""
+    assert result.mod is None
+    assert result.issues[0].kind == mod_manager.IssueKind.CHECKSUM_FAILED
+    assert "does not contain a valid expected xxHash" in result.issues[0].detail
     assert not list(mods_dir.glob("*.download.zip"))
 
 
@@ -266,11 +344,12 @@ def test_download_mod_verifies_only_primary_xxhash(mods_dir: Path, monkeypatch):
 
     monkeypatch.setattr(mod_manager.urllib.request, "urlretrieve", fake_urlretrieve)
 
-    with pytest.raises(mod_manager.ModChecksumError):
-        mod_manager._download_mod(
-            _mod_info("DownloadedMod", xx_hashes=["0" * 16, actual_xxhash])
-        )
+    result = mod_manager._download_mod(
+        _mod_info("DownloadedMod", xx_hashes=["0" * 16, actual_xxhash])
+    )
 
+    assert result.mod is None
+    assert result.issues[0].kind == mod_manager.IssueKind.CHECKSUM_FAILED
     assert not list(mods_dir.glob("*.download.zip"))
 
 
@@ -289,9 +368,10 @@ def test_download_mod_uses_archive_version_when_database_is_stale(
 
     monkeypatch.setattr(mod_manager.urllib.request, "urlretrieve", fake_urlretrieve)
 
-    mod = mod_manager._download_mod(
+    result = mod_manager._download_mod(
         _mod_info("DownloadedMod", version="1.1.0", xx_hashes=[expected_xxhash])
     )
+    mod = result.mod
 
     captured = capsys.readouterr()
     assert mod is not None
@@ -301,12 +381,8 @@ def test_download_mod_uses_archive_version_when_database_is_stale(
     assert (mods_dir / "DownloadedMod-1.2.0.zip").exists()
     assert "  Downloading DownloadedMod-1.1.0.zip" in captured.out
     assert "  Saved DownloadedMod-1.2.0.zip\n" in captured.out
-    assert captured.err == (
-        "WARNING: downloaded 'DownloadedMod' version 1.2.0, but the local "
-        "database reports version 1.1.0. Saved the archive as "
-        "'DownloadedMod-1.2.0.zip'. Run 'celeste-mod-manager update-db' to "
-        "refresh the local mod database.\n"
-    )
+    assert captured.err == ""
+    assert result.issues[0].kind == mod_manager.IssueKind.DATABASE_VERSION_MISMATCH
     assert not list(mods_dir.glob("*.download.zip"))
 
 
@@ -324,10 +400,11 @@ def test_download_mod_rejects_archive_with_different_mod_name(
     monkeypatch.setattr(mod_manager.urllib.request, "urlretrieve", fake_urlretrieve)
     monkeypatch.setattr(mod_manager, "_calculate_xxhash64", lambda _path: "0" * 16)
 
-    with pytest.raises(mod_manager.ModArchiveValidationError):
-        mod_manager._download_mod(_mod_info("DownloadedMod"))
+    result = mod_manager._download_mod(_mod_info("DownloadedMod"))
 
     assert attempts == 1
+    assert result.mod is None
+    assert result.issues[0].kind == mod_manager.IssueKind.ARCHIVE_INVALID
     assert not (mods_dir / "DownloadedMod-1.0.0.zip").exists()
     assert not (mods_dir / "DifferentMod-1.0.0.zip").exists()
     assert not list(mods_dir.glob("*.download.zip"))
@@ -359,21 +436,94 @@ def test_resolve_deps_prints_dependency_progress(
             "DownloadedDependency-1.0.0.zip",
             "DownloadedDependency",
         )
-        return mod_manager.Mod.from_filename("DownloadedDependency-1.0.0.zip")
+        return mod_manager.DownloadResult(
+            mod=mod_manager.Mod.from_filename("DownloadedDependency-1.0.0.zip")
+        )
 
     monkeypatch.setattr(mod_manager, "get_mod_info", fake_get_mod_info)
     monkeypatch.setattr(mod_manager, "_download_mod", fake_download_mod)
 
     root = next(mod for mod in mod_manager.get_installed_mods() if mod.name == "Root")
-    resolved_deps, failed_deps = mod_manager.resolve_deps(root)
+    result = mod_manager.resolve_deps(root)
 
     output = capsys.readouterr().out
-    assert [mod.name for mod in resolved_deps] == ["DownloadedDependency"]
-    assert failed_deps == []
+    assert [mod.name for mod in result.resolved] == ["DownloadedDependency"]
+    assert result.issues == []
     assert "  Resolving dependency InstalledDependency (1.0.0)\n" in output
     assert "  Requirement already satisfied: InstalledDependency (1.0.0)\n" in output
     assert "  Resolving dependency DownloadedDependency (1.0.0)\n" in output
     assert "  Downloading dependency DownloadedDependency\n" in output
+
+
+def test_resolve_deps_preserves_failure_kinds_and_continues_siblings(
+    mods_dir: Path, mod_zip_factory, monkeypatch
+):
+    mod_zip_factory(
+        mods_dir,
+        "Root.zip",
+        "Root",
+        deps=[_dep("MissingDependency"), _dep("DownloadedDependency")],
+    )
+
+    def fake_get_mod_info(mod_name):
+        if mod_name == "DownloadedDependency":
+            return _mod_info(mod_name)
+        return None
+
+    def fake_download_mod(mod_info):
+        mod_zip_factory(
+            mods_dir,
+            "DownloadedDependency.zip",
+            "DownloadedDependency",
+        )
+        return mod_manager.DownloadResult(
+            mod=mod_manager.Mod.from_filename("DownloadedDependency.zip")
+        )
+
+    monkeypatch.setattr(mod_manager, "get_mod_info", fake_get_mod_info)
+    monkeypatch.setattr(mod_manager, "_download_mod", fake_download_mod)
+
+    root = mod_manager.Mod.from_filename("Root.zip")
+    assert root is not None
+    result = mod_manager.resolve_deps(root)
+
+    assert [mod.name for mod in result.resolved] == ["DownloadedDependency"]
+    assert len(result.issues) == 1
+    assert result.issues[0].kind == mod_manager.IssueKind.NOT_FOUND_IN_DB
+    assert result.issues[0].subject == "MissingDependency"
+    assert result.issues[0].dependency_chain == ("Root", "MissingDependency")
+
+
+def test_resolve_deps_distinguishes_duplicate_and_database_failures(
+    mods_dir: Path, mod_zip_factory, monkeypatch
+):
+    mod_zip_factory(
+        mods_dir,
+        "Root.zip",
+        "Root",
+        deps=[_dep("DuplicateDependency"), _dep("DatabaseDependency")],
+    )
+    mod_zip_factory(mods_dir, "Duplicate-a.zip", "DuplicateDependency")
+    mod_zip_factory(mods_dir, "Duplicate-b.zip", "DuplicateDependency")
+
+    def fake_get_mod_info(mod_name):
+        raise OSError(f"database unavailable for {mod_name}")
+
+    monkeypatch.setattr(mod_manager, "get_mod_info", fake_get_mod_info)
+
+    root = mod_manager.Mod.from_filename("Root.zip")
+    assert root is not None
+    result = mod_manager.resolve_deps(root)
+
+    issues = {issue.subject: issue for issue in result.issues}
+    assert issues["DuplicateDependency"].kind == (
+        mod_manager.IssueKind.DUPLICATE_LOCAL_MOD
+    )
+    assert "Duplicate-a.zip, Duplicate-b.zip" in issues["DuplicateDependency"].detail
+    assert issues["DatabaseDependency"].kind == (
+        mod_manager.IssueKind.DATABASE_UNAVAILABLE
+    )
+    assert issues["DatabaseDependency"].retryable
 
 
 def test_ensure_mod_reports_checksum_failure_status(
@@ -388,13 +538,12 @@ def test_ensure_mod_reports_checksum_failure_status(
 
     monkeypatch.setattr(mod_manager.urllib.request, "urlretrieve", fake_urlretrieve)
 
-    mod, status = mod_manager.ensure_mod("DownloadedMod")
+    result = mod_manager.ensure_mod("DownloadedMod")
 
-    assert mod is None
-    assert status == mod_manager.EnsureModStatus.CHECKSUM_FAILED
-    assert (
-        "file integrity check failed for mod 'DownloadedMod'" in capsys.readouterr().err
-    )
+    assert result.mod is None
+    assert result.status == mod_manager.EnsureModStatus.FAILED
+    assert result.issues[-1].kind == mod_manager.IssueKind.CHECKSUM_FAILED
+    assert capsys.readouterr().err == ""
 
 
 def test_install_dependency_does_not_relabel_checksum_failure(
@@ -436,12 +585,12 @@ def test_get_disabled_required_mods_finds_disabled_installed_dependency(
     )
 
     root = next(mod for mod in mod_manager.get_installed_mods() if mod.name == "Root")
-    resolved_deps, failed_deps = mod_manager.resolve_deps(root)
+    result = mod_manager.resolve_deps(root)
     disabled_required_mods = mod_manager.get_disabled_required_mods(root)
 
     output = capsys.readouterr().out
-    assert resolved_deps == []
-    assert failed_deps == []
+    assert result.resolved == []
+    assert result.issues == []
     assert "  Re-enabling dependency DisabledDependency\n" not in output
     assert [mod.name for mod in disabled_required_mods] == ["DisabledDependency"]
     assert "DisabledDependency.zip" in (mods_dir / "blacklist.txt").read_text(

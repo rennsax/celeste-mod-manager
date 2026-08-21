@@ -11,6 +11,7 @@ from loguru import logger
 from . import mod_manager, mod_db
 from .mod_manager import EnsureModStatus
 from . import config
+from .operation import IssueKind, IssueSeverity, OperationIssue, has_errors
 
 
 class _UpdateCheckStatus(Enum):
@@ -31,6 +32,83 @@ class _UpdateCheckEntry:
 
 
 class CelesteModCLI:
+
+    def _render_issues(self, issues: Sequence[OperationIssue]) -> None:
+        unique_issues = sorted(
+            set(issues),
+            key=lambda issue: (
+                0 if issue.severity == IssueSeverity.WARNING else 1,
+                issue.sort_key(),
+            ),
+        )
+        for issue in unique_issues:
+            prefix = "WARNING" if issue.severity == IssueSeverity.WARNING else "ERROR"
+            detail = issue.detail.rstrip(".")
+            chain_suffix = ""
+            if len(issue.dependency_chain) > 1:
+                chain_suffix = (
+                    " Dependency chain: " + " -> ".join(issue.dependency_chain) + "."
+                )
+
+            if issue.kind == IssueKind.LOCAL_MOD_INVALID:
+                message = f"skipped local ZIP '{issue.subject}': {detail}."
+            elif issue.kind == IssueKind.DOWNLOAD_FAILED:
+                attempts = issue.attempts or 1
+                message = (
+                    f"failed to download mod '{issue.subject}' after {attempts} "
+                    f"attempt{'s' if attempts != 1 else ''}: {detail}."
+                )
+            elif issue.kind == IssueKind.DATABASE_UNAVAILABLE:
+                message = (
+                    f"failed to query the mod database for '{issue.subject}': "
+                    f"{detail}.{chain_suffix}"
+                )
+            elif issue.kind == IssueKind.NOT_FOUND_IN_DB:
+                noun = "dependency" if len(issue.dependency_chain) > 1 else "mod"
+                message = (
+                    f"{noun} '{issue.subject}' was not found in the database."
+                    f"{chain_suffix}"
+                )
+            elif issue.kind == IssueKind.CHECKSUM_FAILED:
+                message = f"{detail}."
+            elif issue.kind == IssueKind.ARCHIVE_INVALID:
+                message = (
+                    f"failed to validate archive for mod '{issue.subject}': "
+                    f"{detail}.{chain_suffix}"
+                )
+            elif issue.kind == IssueKind.DUPLICATE_LOCAL_MOD:
+                message = (
+                    f"multiple local archives found for mod '{issue.subject}': "
+                    f"{detail}.{chain_suffix}"
+                )
+            elif issue.kind == IssueKind.VERSION_MISMATCH:
+                message = (
+                    f"dependency version mismatch for '{issue.subject}': "
+                    f"{detail}.{chain_suffix}"
+                )
+            elif issue.kind == IssueKind.DATABASE_VERSION_MISMATCH:
+                message = f"downloaded '{issue.subject}' {detail}."
+            elif issue.kind == IssueKind.EMPTY_REQUIREMENTS:
+                message = "no mods were requested."
+            elif issue.kind == IssueKind.FILESYSTEM_ERROR:
+                message = (
+                    f"{issue.operation} failed for '{issue.subject}': {detail}."
+                    f"{chain_suffix}"
+                )
+            else:
+                message = (
+                    f"unexpected error during {issue.operation} for "
+                    f"'{issue.subject}': {detail}.{chain_suffix}"
+                )
+
+            if issue.hint:
+                message += f" {issue.hint}"
+            print(f"{prefix}: {message}", file=sys.stderr)
+
+    def _scan_installed_mods(self) -> mod_manager.LocalModScanResult:
+        scan_result = mod_manager.scan_installed_mods()
+        self._render_issues(scan_result.issues)
+        return scan_result
 
     def _load_update_mod_index(self) -> dict[str, mod_db.ModInfo] | None:
         url = f"{config.WEGFAN_API_URL}/mod/list"
@@ -62,9 +140,10 @@ class CelesteModCLI:
             return None
 
     def _collect_update_check_entries(self) -> list[_UpdateCheckEntry] | None:
-        mods = sorted(
-            mod_manager.get_installed_mods(), key=lambda mod: mod.name.lower()
-        )
+        scan_result = self._scan_installed_mods()
+        if has_errors(scan_result.issues):
+            return None
+        mods = sorted(scan_result.mods, key=lambda mod: mod.name.lower())
         if not mods:
             return []
 
@@ -125,57 +204,52 @@ class CelesteModCLI:
         return entries
 
     def _install_mod(
-        self, mod_name: str, no_dep: bool = False, optional_deps: bool = False
+        self,
+        mod_name: str,
+        no_dep: bool = False,
+        optional_deps: bool = False,
+        scan_result: mod_manager.LocalModScanResult | None = None,
     ) -> bool:
         print(f"Processing {mod_name}")
-        mod, _status = mod_manager.ensure_mod(mod_name, root=True)
-        if not mod:
-            if _status == EnsureModStatus.NOT_FOUND_IN_DB:
-                print(f"ERROR: mod '{mod_name}' not found in the database.")
-            elif _status == EnsureModStatus.DOWNLOAD_FAILED:
-                print(f"ERROR: failed to download mod '{mod_name}'.")
-            elif _status == EnsureModStatus.CHECKSUM_FAILED:
-                pass
-            elif _status == EnsureModStatus.UNEXPECTED:
-                print(
-                    f"ERROR: failed to install mod '{mod_name}' due to an unexpected error."
-                )
+        if scan_result is None:
+            scan_result = self._scan_installed_mods()
+            if has_errors(scan_result.issues):
+                return False
+        ensure_result = mod_manager.ensure_mod(
+            mod_name,
+            root=True,
+            scan_result=mod_manager.LocalModScanResult(scan_result.mods),
+        )
+        self._render_issues(ensure_result.issues)
+        mod = ensure_result.mod
+        if mod is None:
             return False
 
-        assert _status in {EnsureModStatus.INSTALLED, EnsureModStatus.ALREADY_EXISTS}
-
-        if _status == EnsureModStatus.ALREADY_EXISTS:
+        if ensure_result.status == EnsureModStatus.ALREADY_EXISTS:
             print(f"Requirement already satisfied: {mod.name} ({mod.version})")
 
         if no_dep:
             return True
 
         print(f"Installing dependencies for {mod.name}")
-        try:
-            resolved_deps, failed_deps = mod_manager.resolve_deps(
-                mod, optional=optional_deps
-            )
-        except mod_manager.ModChecksumError:
-            return False
-        except mod_manager.ModArchiveValidationError as e:
-            print(
-                f"ERROR: failed to validate a downloaded dependency for "
-                f"'{mod_name}': {e}",
-                file=sys.stderr,
-            )
-            return False
-        if len(resolved_deps) != 0:
+        resolution_result = mod_manager.resolve_deps(
+            mod,
+            optional=optional_deps,
+            scan_result=mod_manager.LocalModScanResult(scan_result.mods),
+        )
+        self._render_issues(resolution_result.issues)
+        resolved_deps = resolution_result.resolved
+        for resolved_dep in resolved_deps:
+            if resolved_dep not in scan_result.mods:
+                scan_result.mods.append(resolved_dep)
+        if resolved_deps:
             print("Installed dependencies:")
             for dep in resolved_deps:
                 print(f"  - {dep.name} (v{dep.version})")
             print()
-        elif len(failed_deps) == 0:
+        elif resolution_result.ok:
             print("No dependencies to install.")
-        if len(failed_deps) != 0:
-            failed_deps_str = ", ".join(str(mod) for mod in failed_deps)
-            print(
-                f"ERROR: Failed to install the dependencies for {mod_name}: {failed_deps_str}."
-            )
+        if not resolution_result.ok:
             return False
 
         disabled_required_mods = mod_manager.get_disabled_required_mods(
@@ -284,26 +358,33 @@ class CelesteModCLI:
             return 1
 
         exit_code = 0
+        scan_result = self._scan_installed_mods()
+        if has_errors(scan_result.issues):
+            return 1
         for mod_name in mods_to_install:
             if not self._install_mod(
-                mod_name, no_dep=options.no_deps, optional_deps=options.optional_deps
+                mod_name,
+                no_dep=options.no_deps,
+                optional_deps=options.optional_deps,
+                scan_result=scan_result,
             ):
-                print(
-                    f"\033[91mFailed to install '{mod_name}'.\033[0m", file=sys.stderr
-                )
                 exit_code = 1
             else:
                 print(f"Successfully installed '{mod_name}'.\n")
 
         return exit_code
 
-    def search(self, args: list[str]) -> None:
+    def search(self, args: list[str]) -> int:
         """Search for mods in the database and print their information."""
+        if not args:
+            print("ERROR: no search pattern specified.", file=sys.stderr)
+            return 1
+
         pattern = args[0]
         found_mods = mod_db.search_mod_by_name(pattern)
         if not found_mods:
             print(f"No mods found.")
-            return
+            return 0
 
         print(f"Found {len(found_mods)} mod(s) :")
         print("-" * 40)
@@ -311,6 +392,7 @@ class CelesteModCLI:
         for mod in found_mods:
             mod_db.pretty_print_mod_info(mod)
             print("-" * 40)
+        return 0
 
     def list_mods(
         self, args: list[str], prog_name: str = "celeste-mod-manager list"
@@ -332,12 +414,15 @@ class CelesteModCLI:
             help="Only list enabled mods.",
         )
         options, _ = parser.parse_args(args)
+        scan_result = self._scan_installed_mods()
+        if has_errors(scan_result.issues):
+            return 1
         mods = []
         if options.root_only:
             logger.debug("Listing only root mods.")
             mods = mod_manager.get_root_mods()
         else:
-            mods = mod_manager.get_installed_mods()
+            mods = scan_result.mods
         if options.enabled_only:
             blacklisted_filenames = mod_manager.get_blacklisted_mod_filenames()
             mods = [
@@ -378,6 +463,9 @@ class CelesteModCLI:
         options, _ = parser.parse_args(args)
         if options.max_depth <= 0:
             print("ERROR: max depth must be a positive integer.", file=sys.stderr)
+            return 1
+        scan_result = self._scan_installed_mods()
+        if has_errors(scan_result.issues):
             return 1
         mod_manager.analyse_mod_deps(
             maxdepth=options.max_depth,
@@ -475,9 +563,11 @@ class CelesteModCLI:
         )
         return 0
 
-    def _get_installed_mod_by_name(self, mod_name: str) -> mod_manager.Mod | None:
+    def _get_installed_mod_by_name(
+        self, mod_name: str, mods: Sequence[mod_manager.Mod] | None = None
+    ) -> mod_manager.Mod | None:
         """Get an installed mod by its name. Return None if not found."""
-        mods = mod_manager.get_installed_mods()
+        mods = mods if mods is not None else mod_manager.get_installed_mods()
         for mod in mods:
             if mod.name == mod_name:
                 return mod
@@ -596,28 +686,19 @@ class CelesteModCLI:
             optional=options.optional_deps,
             dry_run=options.dry_run,
         )
-        if plan.status == mod_manager.ApplyPlanStatus.DUPLICATE_LOCAL_MOD:
-            duplicates = ", ".join(plan.failed)
-            print(
-                f"ERROR: multiple local archives found for mod(s): {duplicates}.",
-                file=sys.stderr,
-            )
-            return 1
-        if plan.status == mod_manager.ApplyPlanStatus.NOT_FOUND_IN_DB:
-            missing = ", ".join(plan.missing)
-            print(
-                f"ERROR: mod(s) not found in the database: {missing}.",
-                file=sys.stderr,
-            )
-            return 1
-        if plan.status == mod_manager.ApplyPlanStatus.DOWNLOAD_FAILED:
-            failed = ", ".join(plan.failed)
-            print(f"ERROR: failed to download mod(s): {failed}.", file=sys.stderr)
-            return 1
-        if plan.status == mod_manager.ApplyPlanStatus.CHECKSUM_FAILED:
-            return 1
-        if plan.status == mod_manager.ApplyPlanStatus.UNEXPECTED:
-            print("ERROR: failed to build apply plan.", file=sys.stderr)
+        self._render_issues(plan.issues)
+        if plan.status == mod_manager.ApplyPlanStatus.FAILED:
+            if plan.downloaded:
+                print(
+                    "WARNING: apply did not update generated state files; the "
+                    "following verified downloads remain cached:",
+                    file=sys.stderr,
+                )
+                for mod in sorted(plan.downloaded, key=lambda mod: mod.name.casefold()):
+                    print(
+                        f"  - {mod.name} (v{mod.version}) [{mod.get_filename()}]",
+                        file=sys.stderr,
+                    )
             return 1
 
         if not options.dry_run and not mod_manager.apply_required_mods(plan):
@@ -666,6 +747,10 @@ class CelesteModCLI:
             )
             return 1
 
+        scan_result = self._scan_installed_mods()
+        if has_errors(scan_result.issues):
+            return 1
+
         mods_to_delete = mod_manager.build_garbage_collect_plan()
         if not mods_to_delete:
             print("No disabled mods to delete.")
@@ -711,6 +796,10 @@ class CelesteModCLI:
                 "ERROR: uninstall is not implemented when root install tracking is disabled.",
                 file=sys.stderr,
             )
+            return 1
+
+        scan_result = self._scan_installed_mods()
+        if has_errors(scan_result.issues):
             return 1
 
         planned_mods_by_name: dict[str, mod_manager.Mod] = {}
@@ -797,6 +886,10 @@ class CelesteModCLI:
 
         if len(positionals) == 0:
             print(f"ERROR: no mod specified to {action}.", file=sys.stderr)
+            return 1
+
+        scan_result = self._scan_installed_mods()
+        if has_errors(scan_result.issues):
             return 1
 
         planned_mods_by_name: dict[str, mod_manager.Mod] = {}
@@ -902,17 +995,41 @@ class CelesteModCLI:
         mod_name = display_name if display_name is not None else mod.name
         logger.info(f"Try to update mod '{mod_name}'...")
         if mod_info is None:
-            updated_mod, status = None, mod_manager.UpdateModStatus.UNEXPECTED
+            result = mod_manager.UpdateModResult(
+                None,
+                mod_manager.UpdateModStatus.FAILED,
+                [
+                    OperationIssue(
+                        severity=IssueSeverity.ERROR,
+                        kind=IssueKind.NOT_FOUND_IN_DB,
+                        operation="database lookup",
+                        subject=mod_name,
+                        detail="mod was not found in the database",
+                    )
+                ],
+            )
         else:
-            updated_mod, status = mod_manager.update_mod(mod, mod_info=mod_info)
+            result = mod_manager.update_mod(mod, mod_info=mod_info)
+
+        self._render_issues(result.issues)
+        updated_mod = result.mod
+        status = result.status
 
         if status == mod_manager.UpdateModStatus.ALREADY_UP_TO_DATE:
             print(f"'{mod_name}' is already up to date.")
             return 0
         if status == mod_manager.UpdateModStatus.UPDATED:
             if updated_mod is None:
-                print(
-                    f"ERROR: failed to update mod '{mod_name}' due to an unexpected error."
+                self._render_issues(
+                    [
+                        OperationIssue(
+                            severity=IssueSeverity.ERROR,
+                            kind=IssueKind.UNEXPECTED,
+                            operation="update mod",
+                            subject=mod_name,
+                            detail="update reported success without returning a mod",
+                        )
+                    ]
                 )
                 return 1
             print(
@@ -920,13 +1037,6 @@ class CelesteModCLI:
                 f"v{updated_mod.version}.\n"
             )
             return 0
-        if status == mod_manager.UpdateModStatus.DOWNLOAD_FAILED:
-            print(f"ERROR: failed to download the update for mod '{mod_name}'.")
-            return 1
-        if status == mod_manager.UpdateModStatus.CHECKSUM_FAILED:
-            return 1
-
-        print(f"ERROR: failed to update mod '{mod_name}' due to an unexpected error.")
         return 1
 
     def _upgrade_all(self) -> int:
@@ -998,9 +1108,13 @@ class CelesteModCLI:
         if mod_info_index is None:
             return 1
 
+        scan_result = self._scan_installed_mods()
+        if has_errors(scan_result.issues):
+            return 1
+
         exit_code = 0
         for mod_name in positionals:
-            mod = self._get_installed_mod_by_name(mod_name)
+            mod = self._get_installed_mod_by_name(mod_name, scan_result.mods)
             if not mod:
                 print(
                     f"ERROR: mod '{mod_name}' is not installed. Cannot update a mod that is not installed.",

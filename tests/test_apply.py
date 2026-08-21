@@ -86,10 +86,10 @@ def test_ensure_mod_root_false_does_not_record_existing_mod(
 ):
     mod_zip_factory(mods_dir, "Root.zip", "Root")
 
-    mod, status = mod_manager.ensure_mod("Root", root=False)
+    result = mod_manager.ensure_mod("Root", root=False)
 
-    assert status == mod_manager.EnsureModStatus.ALREADY_EXISTS
-    assert mod is not None
+    assert result.status == mod_manager.EnsureModStatus.ALREADY_EXISTS
+    assert result.mod is not None
     assert not (mods_dir / "installed_mods.yml").exists()
 
 
@@ -109,7 +109,9 @@ def test_apply_downloads_missing_root_and_dependency(
             mod_info.name,
             deps=deps,
         )
-        return mod_manager.Mod.from_filename(f"{mod_info.name}-1.0.0.zip")
+        return mod_manager.DownloadResult(
+            mod=mod_manager.Mod.from_filename(f"{mod_info.name}-1.0.0.zip")
+        )
 
     monkeypatch.setattr(mod_manager, "get_mod_info", fake_get_mod_info)
     monkeypatch.setattr(mod_manager, "_download_mod", fake_download_mod)
@@ -134,9 +136,12 @@ def test_apply_reports_checksum_failure_for_missing_root(
 
     plan = mod_manager.build_apply_plan(["Root"])
 
-    assert plan.status == mod_manager.ApplyPlanStatus.CHECKSUM_FAILED
-    assert plan.failed == ["Root"]
-    assert "file integrity check failed for mod 'Root'" in capsys.readouterr().err
+    assert plan.status == mod_manager.ApplyPlanStatus.FAILED
+    assert [
+        issue.subject for issue in plan.issues if issue.severity.value == "error"
+    ] == ["Root"]
+    assert plan.issues[-1].kind == mod_manager.IssueKind.CHECKSUM_FAILED
+    assert capsys.readouterr().err == ""
 
 
 def test_apply_reports_checksum_failure_for_dependency(
@@ -152,9 +157,15 @@ def test_apply_reports_checksum_failure_for_dependency(
 
     plan = mod_manager.build_apply_plan(["Root"])
 
-    assert plan.status == mod_manager.ApplyPlanStatus.CHECKSUM_FAILED
-    assert plan.failed == ["Dependency"]
-    assert "file integrity check failed for mod 'Dependency'" in capsys.readouterr().err
+    assert plan.status == mod_manager.ApplyPlanStatus.FAILED
+    checksum_issue = next(
+        issue
+        for issue in plan.issues
+        if issue.kind == mod_manager.IssueKind.CHECKSUM_FAILED
+    )
+    assert checksum_issue.subject == "Dependency"
+    assert checksum_issue.dependency_chain == ("Root", "Dependency")
+    assert capsys.readouterr().err == ""
 
 
 def test_apply_skips_optional_dependencies_by_default(mods_dir: Path, mod_zip_factory):
@@ -205,8 +216,68 @@ def test_apply_reports_duplicate_local_mod_names(mods_dir: Path, mod_zip_factory
 
     plan = mod_manager.build_apply_plan(["Root"])
 
-    assert plan.status == mod_manager.ApplyPlanStatus.DUPLICATE_LOCAL_MOD
-    assert plan.failed == ["Root"]
+    assert plan.status == mod_manager.ApplyPlanStatus.FAILED
+    assert plan.issues[0].kind == mod_manager.IssueKind.DUPLICATE_LOCAL_MOD
+    assert plan.issues[0].subject == "Root"
+
+
+def test_apply_aggregates_failures_and_reports_retained_downloads(
+    mods_dir: Path, mod_zip_factory, monkeypatch, capsys
+):
+    mod_zip_factory(
+        mods_dir,
+        "ExistingRoot.zip",
+        "ExistingRoot",
+        deps=[_dep("MissingDependency")],
+    )
+    requirement_path = mods_dir / "requirements.txt"
+    requirement_path.write_text(
+        "MissingRoot\nNetworkRoot\nExistingRoot\nCachedRoot\n",
+        encoding="utf-8",
+    )
+
+    def fake_get_mod_info(mod_name):
+        if mod_name in {"NetworkRoot", "CachedRoot"}:
+            return _mod_info(mod_name)
+        return None
+
+    def fake_download_mod(mod_info):
+        if mod_info.name == "NetworkRoot":
+            return mod_manager.DownloadResult(
+                issues=[
+                    mod_manager.OperationIssue(
+                        severity=mod_manager.IssueSeverity.ERROR,
+                        kind=mod_manager.IssueKind.DOWNLOAD_FAILED,
+                        operation="download",
+                        subject="NetworkRoot",
+                        detail="offline",
+                        attempts=3,
+                        retryable=True,
+                    )
+                ]
+            )
+        mod_zip_factory(mods_dir, "CachedRoot.zip", "CachedRoot")
+        return mod_manager.DownloadResult(
+            mod=mod_manager.Mod.from_filename("CachedRoot.zip")
+        )
+
+    monkeypatch.setattr(mod_manager, "get_mod_info", fake_get_mod_info)
+    monkeypatch.setattr(mod_manager, "_download_mod", fake_download_mod)
+
+    assert CelesteModCLI().apply(["-r", str(requirement_path)]) == 1
+
+    captured = capsys.readouterr()
+    assert "mod 'MissingRoot' was not found in the database" in captured.err
+    assert (
+        "dependency 'MissingDependency' was not found in the database" in captured.err
+    )
+    assert "failed to download mod 'NetworkRoot' after 3 attempts" in captured.err
+    assert "failed to build apply plan" not in captured.err
+    assert "following verified downloads remain cached" in captured.err
+    assert "CachedRoot (v1.0.0) [CachedRoot.zip]" in captured.err
+    assert (mods_dir / "CachedRoot.zip").exists()
+    assert not (mods_dir / "blacklist.txt").exists()
+    assert not (mods_dir / "modoptionsorder.txt").exists()
 
 
 def test_apply_mod_options_order_follows_declared_order_with_everest(
@@ -272,6 +343,39 @@ def test_apply_dry_run_does_not_download_or_write_blacklist(
     assert (mods_dir / "modoptionsorder.txt").read_text(
         encoding="utf-8"
     ) == "OldOrder.zip\n"
+
+
+def test_apply_dry_run_aggregates_dependency_lookup_failures(
+    mods_dir: Path, mod_zip_factory, monkeypatch, capsys
+):
+    mod_zip_factory(
+        mods_dir,
+        "Root.zip",
+        "Root",
+        deps=[_dep("MissingDependency"), _dep("AvailableDependency")],
+    )
+    requirement_path = mods_dir / "requirements.txt"
+    requirement_path.write_text("Root\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        mod_manager,
+        "get_mod_info",
+        lambda name: _mod_info(name) if name == "AvailableDependency" else None,
+    )
+
+    def fail_if_downloaded(*args, **kwargs):
+        raise AssertionError("dry-run should not download")
+
+    monkeypatch.setattr(mod_manager, "_download_mod", fail_if_downloaded)
+
+    assert CelesteModCLI().apply(["--dry-run", "-r", str(requirement_path)]) == 1
+
+    captured = capsys.readouterr()
+    assert (
+        "dependency 'MissingDependency' was not found in the database" in captured.err
+    )
+    assert not (mods_dir / "blacklist.txt").exists()
+    assert not (mods_dir / "modoptionsorder.txt").exists()
 
 
 def test_apply_cli_requirement_file_rewrites_blacklist(
