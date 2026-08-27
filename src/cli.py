@@ -4,12 +4,12 @@ import sys
 import textwrap
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 from typing import Sequence
 
 from loguru import logger
 
-from . import mod_manager, mod_db
-from . import config
+from . import config, everest_manager, mod_db, mod_manager
 from .operation import IssueKind, IssueSeverity, OperationIssue, has_errors
 
 
@@ -31,6 +31,272 @@ class _UpdateCheckEntry:
 
 
 class CelesteModCLI:
+
+    @staticmethod
+    def _show_everest_help(prog_name: str) -> None:
+        help_text = f"""\
+                Usage:
+                  {prog_name}
+                    Interactively install, update, reinstall, or downgrade Everest.
+
+                  {prog_name} -h | --help
+                    Show this help message.
+
+                Options:
+                  -h, --help  Show this help message.
+
+                Only modern native Everest builds are available. The command downloads
+                an official main.zip and runs the platform MiniInstaller. Celeste is not
+                started automatically after installation."""
+        print(textwrap.dedent(help_text))
+
+    @staticmethod
+    def _everest_build_label(build: everest_manager.EverestBuild) -> str:
+        version = build.version
+        return (
+            f"{version.version_string:<12} "
+            f"{version.branch:<6} "
+            f"{build.date[:10]:<10} "
+            f"{mod_manager._format_size(build.main_file_size)}"
+        )
+
+    @staticmethod
+    def _is_current_everest_build(
+        current: everest_manager.EverestVersion | None,
+        build: everest_manager.EverestBuild,
+    ) -> bool:
+        return current is not None and (
+            current.build == build.version.build
+            and current.branch == build.version.branch
+        )
+
+    def _browse_everest_builds(
+        self,
+        builds: list[everest_manager.EverestBuild],
+        current: everest_manager.EverestVersion | None,
+    ) -> tuple[everest_manager.EverestBuild | None, bool]:
+        by_number = {build.version.build: build for build in builds}
+        page = 0
+        total_pages = everest_manager.page_count(builds)
+
+        while True:
+            print()
+            print(f"All native Everest builds (page {page + 1}/{total_pages}):")
+            for build in everest_manager.build_page(builds, page):
+                marker = (
+                    " [CURRENT]"
+                    if self._is_current_everest_build(current, build)
+                    else ""
+                )
+                print(
+                    f"  [{build.version.build}] "
+                    f"{self._everest_build_label(build)}{marker}"
+                )
+            print("Commands: n=next, p=previous, b=back, q=cancel")
+            choice = input("Select a build number or command: ").strip().lower()
+            if choice == "q":
+                return None, True
+            if choice == "b":
+                return None, False
+            if choice == "n":
+                if page + 1 < total_pages:
+                    page += 1
+                else:
+                    print("Already on the last page.")
+                continue
+            if choice == "p":
+                if page > 0:
+                    page -= 1
+                else:
+                    print("Already on the first page.")
+                continue
+            if choice.isdigit() and int(choice) in by_number:
+                return by_number[int(choice)], False
+            print("Invalid selection. Enter a listed build number or command.")
+
+    def _select_everest_build(
+        self,
+        builds: list[everest_manager.EverestBuild],
+        current: everest_manager.EverestVersion | None,
+    ) -> everest_manager.EverestBuild | None:
+        latest = everest_manager.newest_builds_by_branch(builds)
+        by_number = {build.version.build: build for build in builds}
+
+        while True:
+            print()
+            print("Latest native Everest builds:")
+            for index, build in enumerate(latest, start=1):
+                markers: list[str] = []
+                if index == 1:
+                    markers.append("RECOMMENDED, DEFAULT")
+                if self._is_current_everest_build(current, build):
+                    markers.append("CURRENT")
+                suffix = f" [{', '.join(markers)}]" if markers else ""
+                print(f"  [{index}] {self._everest_build_label(build)}{suffix}")
+            print("  [a] Browse all native builds")
+            print("  [q] Cancel")
+
+            choice = input("Select a version [1]: ").strip().lower()
+            if choice == "":
+                return latest[0]
+            if choice == "q":
+                return None
+            if choice == "a":
+                selected, cancelled = self._browse_everest_builds(builds, current)
+                if cancelled:
+                    return None
+                if selected is not None:
+                    return selected
+                continue
+            if choice.isdigit():
+                number = int(choice)
+                if 1 <= number <= len(latest):
+                    return latest[number - 1]
+                if number in by_number:
+                    return by_number[number]
+            print("Invalid selection. Choose a listed option or Everest build number.")
+
+    @staticmethod
+    def _describe_everest_state(
+        state: everest_manager.EverestInstallationState,
+    ) -> str:
+        if state.kind == everest_manager.EverestStateKind.VANILLA:
+            return "Vanilla Celeste (Everest is not installed)"
+        if state.version is None:
+            return "Unknown"
+        return f"{state.version.version_string} ({state.version.branch})"
+
+    @staticmethod
+    def _report_everest_state(
+        celeste_dir: Path,
+        state: everest_manager.EverestInstallationState,
+    ) -> None:
+        print("Current Everest installation:")
+        print(f"  Celeste directory: {celeste_dir}")
+        if state.kind == everest_manager.EverestStateKind.VANILLA:
+            print("  Status:            Not installed (vanilla Celeste)")
+        elif state.version is not None:
+            print("  Status:            Installed")
+            print(f"  Version:           {state.version.version_string}")
+            print(f"  Channel:           {state.version.branch}")
+        else:
+            print("  Status:            Unknown")
+
+    @staticmethod
+    def _confirm(prompt: str) -> bool:
+        return input(prompt).strip().lower() in ("y", "yes")
+
+    def everest(
+        self,
+        args: Sequence[str],
+        prog_name: str = "celeste-mod-manager everest",
+    ) -> int:
+        """Interactively install or update Everest using MiniInstaller."""
+        if list(args) in (["-h"], ["--help"]):
+            self._show_everest_help(prog_name)
+            return 0
+        if args:
+            print(
+                f"ERROR: unexpected argument(s): {' '.join(args)}. "
+                "The everest command only supports -h and --help.",
+                file=sys.stderr,
+            )
+            return 1
+        if not sys.stdin.isatty():
+            print(
+                "ERROR: the everest command requires an interactive terminal.",
+                file=sys.stderr,
+            )
+            return 1
+
+        celeste_dir = Path(config.MODS_DIR).parent.resolve()
+        try:
+            state = everest_manager.detect_installation(celeste_dir)
+            self._report_everest_state(celeste_dir, state)
+            everest_manager.ensure_supported_platform()
+            if state.kind == everest_manager.EverestStateKind.UNKNOWN:
+                print(
+                    "WARNING: could not reliably detect the current Celeste/Everest "
+                    f"state: {state.detail}",
+                    file=sys.stderr,
+                )
+                if not self._confirm("Continue despite the detection failure? [y/N] "):
+                    print("Cancelled Everest installation.")
+                    return 0
+
+            builds = everest_manager.get_available_builds()
+            selected = self._select_everest_build(builds, state.version)
+            if selected is None:
+                print("Cancelled Everest installation.")
+                return 0
+
+            action = everest_manager.classify_action(state, selected)
+            if action == everest_manager.EverestAction.REINSTALL:
+                print(
+                    "WARNING: the selected build is already installed. Reinstalling "
+                    "will overwrite Everest runtime files."
+                )
+                if not self._confirm("Continue with the reinstall? [y/N] "):
+                    print("Cancelled Everest installation.")
+                    return 0
+            elif action == everest_manager.EverestAction.DOWNGRADE:
+                current = state.version
+                assert current is not None
+                print(
+                    "WARNING: downgrading Everest can make newer mods or settings "
+                    f"incompatible ({current.version_string} -> "
+                    f"{selected.version.version_string})."
+                )
+                if not self._confirm("Continue with the downgrade? [y/N] "):
+                    print("Cancelled Everest installation.")
+                    return 0
+
+            delete_stale_orig = (
+                state.kind == everest_manager.EverestStateKind.VANILLA
+                and (celeste_dir / "orig").is_dir()
+            )
+            print()
+            print("Everest installation summary:")
+            print(f"  Celeste directory: {celeste_dir}")
+            print(f"  Current version:   {self._describe_everest_state(state)}")
+            print(
+                f"  Target version:    {selected.version.version_string} "
+                f"(build {selected.version.build})"
+            )
+            print(f"  Channel:           {selected.version.branch}")
+            print(
+                f"  Download size:     "
+                f"{mod_manager._format_size(selected.main_file_size)}"
+            )
+            print(f"  Action:            {action.value}")
+            if delete_stale_orig:
+                print(
+                    "  Existing orig/:    Will be deleted so MiniInstaller can "
+                    "create a fresh backup"
+                )
+
+            if not self._confirm("Proceed? [y/N] "):
+                print("Cancelled Everest installation.")
+                return 0
+
+            everest_manager.install_build(
+                celeste_dir,
+                selected,
+                delete_stale_orig=delete_stale_orig,
+            )
+        except EOFError:
+            print("Cancelled Everest installation.")
+            return 0
+        except everest_manager.EverestError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            return 1
+
+        print(
+            f"Successfully installed Everest {selected.version.version_string} "
+            f"({selected.version.branch})."
+        )
+        print("Celeste was not started automatically.")
+        return 0
 
     def _render_issues(self, issues: Sequence[OperationIssue]) -> None:
         unique_issues = sorted(

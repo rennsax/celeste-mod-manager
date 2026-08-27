@@ -30,6 +30,8 @@ Commands:
     update-db          Force update the local mod database from the server.
     upgrade            Upgrade selected mod(s), or use ALL to upgrade every
                        outdated mod after confirmation.
+    everest            Interactively install or update Everest using the
+                       official MiniInstaller.
 
 Options:
     --celeste-dir <path>  Specify the path to the Celeste directory.
@@ -102,6 +104,9 @@ def _run_cli() -> int:
         cmd_help()
         return 0
 
+    if subcommand == "everest" and extra_args:
+        return cli.everest(extra_args, prog_name="celeste-mod-manager everest")
+
     _configure_logger(options.log_level)
 
     logger.debug(f"Global options: {options}, Remaining args: {args}")
@@ -146,6 +151,8 @@ def _run_cli() -> int:
         return cli.update_db(extra_args)
     elif subcommand == "upgrade":
         return cli.upgrade(extra_args, prog_name=f"celeste-mod-manager upgrade")
+    elif subcommand == "everest":
+        return cli.everest(extra_args, prog_name="celeste-mod-manager everest")
     else:
         print(f"ERROR: unknown command '{subcommand}'", file=sys.stderr)
         print()
