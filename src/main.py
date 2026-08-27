@@ -172,7 +172,10 @@ def _run_cli() -> int:
 
     _configure_logger(options.log_level)
 
-    logger.debug(f"Global options: {options}, Remaining args: {args}")
+    logger.debug(
+        f"Global options: celeste_dir={options.celeste_dir!r}, "
+        f"log_level={options.log_level!r}; Remaining args: {args!r}"
+    )
 
     configure_celeste_dir(options.celeste_dir)
     if subcommand != "everest":
