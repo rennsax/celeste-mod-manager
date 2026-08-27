@@ -5,8 +5,8 @@ import zipfile
 from dataclasses import dataclass
 from loguru import logger
 
-from . import config
 from .operation import IssueKind, IssueSeverity, OperationIssue
+from .path import get_mods_dir
 
 
 @dataclass
@@ -96,7 +96,7 @@ class Mod:
           for Everest too.
         """
 
-        filepath = os.path.join(config.MODS_DIR, filename)
+        filepath = str(get_mods_dir() / filename)
 
         if not os.path.exists(filepath):
             logger.error(f"File '{filepath}' does not exist.")
@@ -120,7 +120,7 @@ class Mod:
 
     @staticmethod
     def load_from_filename(filename: str) -> ModLoadResult:
-        filepath = os.path.join(config.MODS_DIR, filename)
+        filepath = str(get_mods_dir() / filename)
         if not os.path.exists(filepath):
             return ModLoadResult(
                 None, [_invalid_mod_issue(filename, "file does not exist")]

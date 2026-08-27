@@ -617,7 +617,7 @@ def test_upgrade_all_must_be_the_only_argument(monkeypatch, capsys):
     assert captured.err == "ERROR: ALL must be the only argument to upgrade.\n"
 
 
-def test_upgrade_lowercase_all_is_a_regular_mod_name(monkeypatch, capsys):
+def test_upgrade_lowercase_all_is_a_regular_mod_name(mods_dir, monkeypatch, capsys):
     monkeypatch.setattr(CelesteModCLI, "_load_update_mod_index", lambda _self: {})
     monkeypatch.setattr(mod_manager, "get_installed_mods", lambda: [])
 
@@ -631,7 +631,7 @@ def test_upgrade_lowercase_all_is_a_regular_mod_name(monkeypatch, capsys):
     )
 
 
-def test_upgrade_all_reports_when_no_mods_are_installed(monkeypatch, capsys):
+def test_upgrade_all_reports_when_no_mods_are_installed(mods_dir, monkeypatch, capsys):
     monkeypatch.setattr(mod_manager, "get_installed_mods", lambda: [])
     monkeypatch.setattr(
         CelesteModCLI,

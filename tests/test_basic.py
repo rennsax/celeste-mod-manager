@@ -3,18 +3,17 @@ import time
 from pathlib import Path
 
 from src import config, mod_db, mod_manager
-from src.path import set_mod_paths
+from src.path import get_mod_db_path, get_mods_dir
 
 
-def test_mods_dir_fixture_monkeypatches_config(mods_dir: Path):
-    assert config.MODS_DIR == str(mods_dir)
+def test_mods_dir_fixture_configures_celeste_dir(mods_dir: Path):
+    assert Path(config.CELESTE_DIR) == mods_dir.parent
+    assert get_mods_dir() == mods_dir
 
 
-def test_set_mod_paths_stores_mod_db_in_mods_dir(tmp_path: Path):
-    set_mod_paths(tmp_path)
-
-    assert config.MODS_DIR == str(tmp_path / "Mods")
-    assert config.MOD_DB_PATH == str(tmp_path / "Mods" / "celeste_mod_db.json")
+def test_mod_paths_are_derived_from_celeste_dir(mods_dir: Path):
+    assert get_mods_dir() == mods_dir
+    assert get_mod_db_path() == mods_dir / "celeste_mod_db.json"
 
 
 def test_dummy_mod_zip_is_loaded_from_monkeypatched_mods_dir(
@@ -30,9 +29,8 @@ def test_dummy_mod_zip_is_loaded_from_monkeypatched_mods_dir(
     assert mods[0].get_filename() == "random-local-name.zip"
 
 
-def test_get_mod_db_notifies_when_refreshing(tmp_path: Path, monkeypatch, capsys):
-    db_path = tmp_path / "celeste_mod_db.json"
-    monkeypatch.setattr(config, "MOD_DB_PATH", str(db_path))
+def test_get_mod_db_notifies_when_refreshing(mods_dir: Path, monkeypatch, capsys):
+    db_path = mods_dir / "celeste_mod_db.json"
 
     class FakeResponse:
         def __enter__(self):
@@ -53,13 +51,12 @@ def test_get_mod_db_notifies_when_refreshing(tmp_path: Path, monkeypatch, capsys
 
 
 def test_get_mod_db_does_not_notify_when_using_fresh_cache(
-    tmp_path: Path, monkeypatch, capsys
+    mods_dir: Path, monkeypatch, capsys
 ):
-    db_path = tmp_path / "celeste_mod_db.json"
+    db_path = mods_dir / "celeste_mod_db.json"
     db_path.write_text(
         json.dumps({"lastUpdateTime": time.time(), "data": []}), encoding="utf-8"
     )
-    monkeypatch.setattr(config, "MOD_DB_PATH", str(db_path))
 
     def fail_if_refreshed(_url):
         raise AssertionError("a fresh cache must not trigger a refresh")

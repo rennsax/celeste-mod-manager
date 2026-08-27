@@ -11,6 +11,7 @@ from loguru import logger
 
 from . import config, everest_manager, mod_db, mod_manager
 from .operation import IssueKind, IssueSeverity, OperationIssue, has_errors
+from .path import get_configured_celeste_dir, get_mods_dir
 
 
 class _UpdateCheckStatus(Enum):
@@ -209,7 +210,7 @@ class CelesteModCLI:
             )
             return 1
 
-        celeste_dir = Path(config.MODS_DIR).parent.resolve()
+        celeste_dir = get_configured_celeste_dir()
         try:
             state = everest_manager.detect_installation(celeste_dir)
             self._report_everest_state(celeste_dir, state)
@@ -475,7 +476,15 @@ class CelesteModCLI:
             return 1
 
         pattern = args[0]
-        found_mods = mod_db.search_mod_by_name(pattern)
+        try:
+            found_mods = mod_db.search_mod_by_name(pattern)
+        except Exception as e:
+            logger.opt(exception=e).debug("Failed to load the local mod database.")
+            print(
+                f"ERROR: failed to load the local mod database: {e}",
+                file=sys.stderr,
+            )
+            return 1
         if not found_mods:
             print(f"No mods found.")
             return 0
@@ -718,8 +727,8 @@ class CelesteModCLI:
             )
             return 1
 
-        requirement_path = options.requirement or os.path.join(
-            config.MODS_DIR, "required_mods.txt"
+        requirement_path = options.requirement or str(
+            get_mods_dir() / "required_mods.txt"
         )
         if not os.path.isfile(requirement_path):
             print(

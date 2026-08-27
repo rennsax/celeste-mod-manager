@@ -4,7 +4,35 @@ from loguru import logger
 
 from . import config
 from .cli import CelesteModCLI
-from .path import get_celeste_dir, set_mod_paths
+from .path import (
+    CelestePathError,
+    configure_celeste_dir,
+    validate_mod_db_path,
+    validate_mods_dir,
+)
+
+_KNOWN_COMMANDS = {
+    "search",
+    "list",
+    "list-tree",
+    "apply",
+    "gc",
+    "garbage-collect",
+    "check-updates",
+    "update-db",
+    "upgrade",
+    "everest",
+}
+_SUBCOMMANDS_WITH_HELP = {
+    "list",
+    "list-tree",
+    "apply",
+    "gc",
+    "garbage-collect",
+    "upgrade",
+    "everest",
+}
+_DATABASE_COMMANDS = {"search", "apply", "check-updates", "update-db", "upgrade"}
 
 
 class GlobalOptions:
@@ -34,7 +62,8 @@ Commands:
                        official MiniInstaller.
 
 Options:
-    --celeste-dir <path>  Specify the path to the Celeste directory.
+    --celeste-dir <path>  Specify the Celeste directory, overriding config and
+                          automatic discovery.
     --log-level <level>   Set the log level (TRACE, DEBUG, INFO, WARNING, ERROR, CRITICAL).""",
         file=sys.stderr,
     )
@@ -85,9 +114,31 @@ def _configure_logger(level: str) -> None:
     logger.add(sys.stderr, level=level)
 
 
-def _run_cli() -> int:
-    cli = CelesteModCLI()
+def _dispatch_cli(cli: CelesteModCLI, subcommand: str, extra_args: list[str]) -> int:
+    if subcommand == "search":
+        return cli.search(extra_args)
+    if subcommand == "list":
+        return cli.list_mods(extra_args)
+    if subcommand == "list-tree":
+        return cli.list_tree(extra_args, prog_name="celeste-mod-manager list-tree")
+    if subcommand == "apply":
+        return cli.apply(extra_args, prog_name="celeste-mod-manager apply")
+    if subcommand in {"gc", "garbage-collect"}:
+        return cli.garbage_collect(
+            extra_args, prog_name=f"celeste-mod-manager {subcommand}"
+        )
+    if subcommand == "check-updates":
+        return cli.check_updates(extra_args)
+    if subcommand == "update-db":
+        return cli.update_db(extra_args)
+    if subcommand == "upgrade":
+        return cli.upgrade(extra_args, prog_name="celeste-mod-manager upgrade")
+    if subcommand == "everest":
+        return cli.everest(extra_args, prog_name="celeste-mod-manager everest")
+    raise AssertionError(f"cannot dispatch unknown command: {subcommand}")
 
+
+def _run_cli() -> int:
     # Dispatch
     args, options, parse_error = _parse_global_args(sys.argv[1:])
     if parse_error:
@@ -104,66 +155,41 @@ def _run_cli() -> int:
         cmd_help()
         return 0
 
+    if subcommand not in _KNOWN_COMMANDS:
+        print(f"ERROR: unknown command '{subcommand}'", file=sys.stderr)
+        print()
+        cmd_help()
+        return 1
+
     if subcommand == "everest" and extra_args:
-        return cli.everest(extra_args, prog_name="celeste-mod-manager everest")
+        return _dispatch_cli(CelesteModCLI(), subcommand, extra_args)
+
+    if subcommand in _SUBCOMMANDS_WITH_HELP and extra_args in (
+        ["-h"],
+        ["--help"],
+    ):
+        return _dispatch_cli(CelesteModCLI(), subcommand, extra_args)
 
     _configure_logger(options.log_level)
 
     logger.debug(f"Global options: {options}, Remaining args: {args}")
 
-    if options.celeste_dir is not None:
-        if options.celeste_dir.exists() and options.celeste_dir.is_dir():
-            logger.debug(
-                f"Using Celeste directory from command line: {options.celeste_dir}"
-            )
-            set_mod_paths(options.celeste_dir)
-        else:
-            print(
-                f"ERROR: specified Celeste directory '{options.celeste_dir}' does not exist or is not a directory.",
-                file=sys.stderr,
-            )
-            return 1
-    else:
-        celeste_dir = get_celeste_dir()
-        if celeste_dir is None:
-            print(
-                "ERROR: Could not find Celeste installation directory. Please make sure Celeste is installed.",
-                file=sys.stderr,
-            )
-            return 1
-        set_mod_paths(celeste_dir)
+    configure_celeste_dir(options.celeste_dir)
+    if subcommand != "everest":
+        validate_mods_dir()
+    if subcommand in _DATABASE_COMMANDS:
+        validate_mod_db_path()
 
-    if subcommand == "search":
-        return cli.search(extra_args)
-    elif subcommand == "list":
-        return cli.list_mods(extra_args)
-    elif subcommand == "list-tree":
-        return cli.list_tree(extra_args, prog_name=f"celeste-mod-manager list-tree")
-    elif subcommand == "apply":
-        return cli.apply(extra_args, prog_name=f"celeste-mod-manager apply")
-    elif subcommand in {"gc", "garbage-collect"}:
-        return cli.garbage_collect(
-            extra_args, prog_name=f"celeste-mod-manager {subcommand}"
-        )
-    elif subcommand == "check-updates":
-        return cli.check_updates(extra_args)
-    elif subcommand == "update-db":
-        return cli.update_db(extra_args)
-    elif subcommand == "upgrade":
-        return cli.upgrade(extra_args, prog_name=f"celeste-mod-manager upgrade")
-    elif subcommand == "everest":
-        return cli.everest(extra_args, prog_name="celeste-mod-manager everest")
-    else:
-        print(f"ERROR: unknown command '{subcommand}'", file=sys.stderr)
-        print()
-        cmd_help()
-        return 1
+    return _dispatch_cli(CelesteModCLI(), subcommand, extra_args)
 
 
 def main() -> int:
     try:
         _configure_logger(config.DEFAULT_LOG_LEVEL)
         return _run_cli()
+    except CelestePathError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
     except KeyboardInterrupt:
         print("Cancelled by user.", file=sys.stderr)
         return 130

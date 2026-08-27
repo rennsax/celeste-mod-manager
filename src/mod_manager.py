@@ -13,10 +13,10 @@ from loguru import logger
 from rich.console import Console
 from rich.progress import BarColumn, Progress, TextColumn
 
-from . import config
 from .mod import Mod
 from .mod_db import ModInfo, get_mod_info
 from .operation import IssueKind, IssueSeverity, OperationIssue, has_errors
+from .path import get_mods_dir
 
 _DOWNLOAD_MAX_ATTEMPTS = 3
 _DOWNLOAD_PROGRESS_WIDTH = 30
@@ -188,21 +188,7 @@ def _download_mod(mod_info: ModInfo) -> DownloadResult:
 
     url = mod_info.submissionFile.url
     requested_filename = f"{mod_info.name}-{mod_info.version}.zip"
-
-    try:
-        os.makedirs(config.MODS_DIR, exist_ok=True)
-    except OSError as e:
-        return DownloadResult(
-            issues=[
-                OperationIssue(
-                    severity=IssueSeverity.ERROR,
-                    kind=IssueKind.FILESYSTEM_ERROR,
-                    operation="prepare download directory",
-                    subject=mod_info.name,
-                    detail=str(e),
-                )
-            ]
-        )
+    mods_dir = get_mods_dir()
 
     expected_size = mod_info.submissionFile.size
     print(f"Collecting {mod_info.name}")
@@ -224,7 +210,7 @@ def _download_mod(mod_info: ModInfo) -> DownloadResult:
                 fd, temporary_filepath = tempfile.mkstemp(
                     prefix=f".{requested_filename}.",
                     suffix=".download.zip",
-                    dir=config.MODS_DIR,
+                    dir=mods_dir,
                 )
             except OSError as e:
                 return DownloadResult(
@@ -377,7 +363,7 @@ def _download_mod(mod_info: ModInfo) -> DownloadResult:
                         )
                     ]
                 )
-            filepath = os.path.join(config.MODS_DIR, filename)
+            filepath = str(mods_dir / filename)
 
             try:
                 os.replace(temporary_filepath, filepath)
@@ -441,10 +427,11 @@ def _download_mod(mod_info: ModInfo) -> DownloadResult:
 
 
 def scan_installed_mods() -> LocalModScanResult:
-    if not os.path.exists(config.MODS_DIR):
+    mods_dir = get_mods_dir()
+    if not mods_dir.exists():
         return LocalModScanResult()
     try:
-        files = [f for f in os.listdir(config.MODS_DIR) if f != "Cache"]
+        files = [f for f in os.listdir(mods_dir) if f != "Cache"]
     except OSError as e:
         return LocalModScanResult(
             issues=[
@@ -452,7 +439,7 @@ def scan_installed_mods() -> LocalModScanResult:
                     severity=IssueSeverity.ERROR,
                     kind=IssueKind.FILESYSTEM_ERROR,
                     operation="local mod scan",
-                    subject=config.MODS_DIR,
+                    subject=str(mods_dir),
                     detail=str(e),
                 )
             ]
@@ -461,7 +448,7 @@ def scan_installed_mods() -> LocalModScanResult:
     mods = []
     issues = []
     for filename in files:
-        filepath = os.path.join(config.MODS_DIR, filename)
+        filepath = str(mods_dir / filename)
         if os.path.isfile(filepath) and filename.lower().endswith(".zip"):
             load_result = Mod.load_from_filename(filename)
             issues.extend(load_result.issues)
@@ -1043,15 +1030,15 @@ _MOD_OPTIONS_ORDER_HEADER = (
 
 
 def _get_blacklist_path() -> str:
-    return os.path.join(config.MODS_DIR, "blacklist.txt")
+    return str(get_mods_dir() / "blacklist.txt")
 
 
 def _get_update_blacklist_path() -> str:
-    return os.path.join(config.MODS_DIR, "updaterblacklist.txt")
+    return str(get_mods_dir() / "updaterblacklist.txt")
 
 
 def _get_mod_options_order_path() -> str:
-    return os.path.join(config.MODS_DIR, "modoptionsorder.txt")
+    return str(get_mods_dir() / "modoptionsorder.txt")
 
 
 def _read_blacklist_lines() -> list[str]:
@@ -1091,8 +1078,6 @@ def _write_blacklist_filenames(
     filenames_to_add = filenames_to_add or set()
     filenames_to_remove = filenames_to_remove or set()
 
-    os.makedirs(config.MODS_DIR, exist_ok=True)
-
     entries = set()
     for line in _read_blacklist_lines():
         entry = line.strip()
@@ -1111,8 +1096,6 @@ def _write_blacklist_filenames(
 
 
 def _replace_blacklist_filenames(filenames: set[str]) -> None:
-    os.makedirs(config.MODS_DIR, exist_ok=True)
-
     new_lines = list(_BLACKLIST_HEADER)
     new_lines.extend(sorted(filenames, key=str.lower))
 
@@ -1122,8 +1105,6 @@ def _replace_blacklist_filenames(filenames: set[str]) -> None:
 
 
 def _replace_mod_options_order_entries(entries: list[str]) -> None:
-    os.makedirs(config.MODS_DIR, exist_ok=True)
-
     new_lines = list(_MOD_OPTIONS_ORDER_HEADER)
     new_lines.extend(entries)
 

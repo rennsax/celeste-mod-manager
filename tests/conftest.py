@@ -33,8 +33,11 @@ def make_mod_zip(
 
 @pytest.fixture
 def mods_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    monkeypatch.setattr(config, "MODS_DIR", str(tmp_path))
-    return tmp_path
+    (tmp_path / "Celeste.exe").touch()
+    mods_path = tmp_path / "Mods"
+    mods_path.mkdir()
+    monkeypatch.setattr(config, "CELESTE_DIR", str(tmp_path))
+    return mods_path
 
 
 @pytest.fixture

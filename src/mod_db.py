@@ -1,4 +1,3 @@
-import os
 import urllib.request
 import json
 import time
@@ -7,6 +6,7 @@ from loguru import logger
 from rapidfuzz import fuzz
 
 from . import config
+from .path import get_mod_db_path
 
 
 @dataclass
@@ -76,7 +76,7 @@ class ModInfo:
 
 def get_cached_mod_db() -> list[dict]:
     """Read the cached mod database without applying the refresh TTL."""
-    with open(config.MOD_DB_PATH, "r", encoding="utf-8") as f:
+    with get_mod_db_path().open("r", encoding="utf-8") as f:
         cached_data = json.load(f)
 
     mod_list = cached_data.get("data")
@@ -96,11 +96,12 @@ def index_mod_infos(mod_list: list[dict]) -> dict[str, ModInfo]:
 def get_mod_db(
     url: str, force_update: bool = config.FORCE_UPDATE_DEFAULT
 ) -> list[dict]:
-    needs_update = force_update or not os.path.exists(config.MOD_DB_PATH)
+    mod_db_path = get_mod_db_path()
+    needs_update = force_update or not mod_db_path.exists()
 
     if not needs_update:
         try:
-            with open(config.MOD_DB_PATH, "r", encoding="utf-8") as f:
+            with mod_db_path.open("r", encoding="utf-8") as f:
                 data = json.load(f)
                 last_update_ts = data.get("lastUpdateTime")
                 if last_update_ts is not None:
@@ -122,7 +123,7 @@ def get_mod_db(
             db_data = json.loads(response.read().decode("utf-8"))
         db_data["lastUpdateTime"] = time.time()
 
-        with open(config.MOD_DB_PATH, "w", encoding="utf-8") as f:
+        with mod_db_path.open("w", encoding="utf-8") as f:
             json.dump(db_data, f, ensure_ascii=False)
 
     return get_cached_mod_db()

@@ -3,13 +3,15 @@ from pathlib import Path
 
 import pytest
 
-from src import main, mod_db
+from src import config, main, mod_db, path as celeste_path
 from src.cli import CelesteModCLI
 
 
 def _prepare_main(monkeypatch, tmp_path: Path, *args: str) -> None:
-    monkeypatch.setattr(main, "get_celeste_dir", lambda: tmp_path)
-    monkeypatch.setattr(main, "set_mod_paths", lambda _path: None)
+    (tmp_path / "Celeste.exe").touch(exist_ok=True)
+    (tmp_path / "Mods").mkdir(exist_ok=True)
+    monkeypatch.setattr(config, "CELESTE_DIR", "")
+    monkeypatch.setattr(celeste_path, "find_celeste_dir_from_steam", lambda: tmp_path)
     monkeypatch.setattr(sys, "argv", ["celeste-mod-manager", *args])
 
 
@@ -78,6 +80,22 @@ def test_search_returns_success_and_preserves_result_output(monkeypatch, capsys)
         "----------------------------------------\n"
     )
     assert captured.err == ""
+
+
+def test_search_reports_database_failure_without_internal_error(monkeypatch, capsys):
+    monkeypatch.setattr(
+        mod_db,
+        "search_mod_by_name",
+        lambda _pattern: (_ for _ in ()).throw(OSError("database is read-only")),
+    )
+
+    assert CelesteModCLI().search(["CelesteTAS"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == (
+        "ERROR: failed to load the local mod database: database is read-only\n"
+    )
 
 
 def test_main_propagates_search_exit_code(tmp_path: Path, monkeypatch, capsys):
@@ -151,3 +169,131 @@ def test_main_does_not_convert_system_exit(tmp_path: Path, monkeypatch):
         main.main()
 
     assert exc_info.value.code == 7
+
+
+def test_missing_mods_directory_fails_before_non_everest_dispatch(
+    tmp_path: Path, monkeypatch, capsys
+):
+    (tmp_path / "Celeste.exe").touch()
+    monkeypatch.setattr(config, "CELESTE_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        main,
+        "CelesteModCLI",
+        lambda: pytest.fail("missing Mods must fail before dispatch"),
+    )
+    monkeypatch.setattr(sys, "argv", ["celeste-mod-manager", "list"])
+
+    assert main.main() == 1
+    assert capsys.readouterr().err == (
+        f"ERROR: Mods directory '{tmp_path / 'Mods'}' does not exist. "
+        "Everest may not be installed or may be damaged. Install or repair it "
+        "with 'celeste-mod-manager everest'.\n"
+    )
+
+
+def test_everest_dispatch_allows_valid_celeste_without_mods(
+    tmp_path: Path, monkeypatch, capsys
+):
+    (tmp_path / "Celeste.exe").touch()
+    monkeypatch.setattr(config, "CELESTE_DIR", str(tmp_path))
+    calls = []
+
+    class FakeCLI:
+        def everest(self, args, prog_name):
+            calls.append((args, prog_name))
+            return 0
+
+    monkeypatch.setattr(main, "CelesteModCLI", FakeCLI)
+    monkeypatch.setattr(sys, "argv", ["celeste-mod-manager", "everest"])
+
+    assert main.main() == 0
+    assert calls == [([], "celeste-mod-manager everest")]
+    assert capsys.readouterr().err == ""
+
+
+def test_empty_mods_directory_remains_a_valid_empty_install(
+    tmp_path: Path, monkeypatch, capsys
+):
+    (tmp_path / "Celeste.exe").touch()
+    (tmp_path / "Mods").mkdir()
+    monkeypatch.setattr(config, "CELESTE_DIR", str(tmp_path))
+    monkeypatch.setattr(sys, "argv", ["celeste-mod-manager", "list"])
+
+    assert main.main() == 0
+    assert capsys.readouterr().out == "No mods installed.\n"
+
+
+def test_database_directory_fails_before_database_command_dispatch(
+    tmp_path: Path, monkeypatch, capsys
+):
+    (tmp_path / "Celeste.exe").touch()
+    mods_dir = tmp_path / "Mods"
+    mods_dir.mkdir()
+    (mods_dir / "celeste_mod_db.json").mkdir()
+    monkeypatch.setattr(config, "CELESTE_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        main,
+        "CelesteModCLI",
+        lambda: pytest.fail("invalid database path must fail before dispatch"),
+    )
+    monkeypatch.setattr(sys, "argv", ["celeste-mod-manager", "search", "CelesteTAS"])
+
+    assert main.main() == 1
+    assert "expected a file, found a directory" in capsys.readouterr().err
+
+
+def test_cli_celeste_dir_overrides_configured_path(tmp_path: Path, monkeypatch, capsys):
+    configured = tmp_path / "configured"
+    override = tmp_path / "override"
+    for celeste_dir in (configured, override):
+        celeste_dir.mkdir()
+        (celeste_dir / "Celeste.exe").touch()
+        (celeste_dir / "Mods").mkdir()
+
+    monkeypatch.setattr(config, "CELESTE_DIR", str(configured))
+    monkeypatch.setattr(
+        celeste_path,
+        "find_celeste_dir_from_steam",
+        lambda: pytest.fail("CLI override must not use automatic discovery"),
+    )
+    calls = []
+
+    class FakeCLI:
+        def list_mods(self, args):
+            calls.append((args, config.CELESTE_DIR))
+            return 0
+
+    monkeypatch.setattr(main, "CelesteModCLI", FakeCLI)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["celeste-mod-manager", "--celeste-dir", str(override), "list"],
+    )
+
+    assert main.main() == 0
+    assert calls == [([], str(override.resolve()))]
+    assert capsys.readouterr().err == ""
+
+
+def test_unknown_command_does_not_trigger_path_resolution(monkeypatch, capsys):
+    monkeypatch.setattr(
+        main,
+        "configure_celeste_dir",
+        lambda override: pytest.fail("unknown command must not resolve paths"),
+    )
+    monkeypatch.setattr(sys, "argv", ["celeste-mod-manager", "unknown"])
+
+    assert main.main() == 1
+    assert "ERROR: unknown command 'unknown'" in capsys.readouterr().err
+
+
+def test_subcommand_help_does_not_trigger_path_resolution(monkeypatch, capsys):
+    monkeypatch.setattr(
+        main,
+        "configure_celeste_dir",
+        lambda override: pytest.fail("subcommand help must not resolve paths"),
+    )
+    monkeypatch.setattr(sys, "argv", ["celeste-mod-manager", "apply", "--help"])
+
+    assert main.main() == 0
+    assert "Usage:" in capsys.readouterr().out

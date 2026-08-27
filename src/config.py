@@ -2,5 +2,4 @@ WEGFAN_API_URL = "https://celeste.weg.fan/api/v2"
 FORCE_UPDATE_DEFAULT = False
 DB_UPDATE_PERIOD_DAYS = 7
 DEFAULT_LOG_LEVEL = "ERROR"
-MOD_DB_PATH = ""
-MODS_DIR = ""
+CELESTE_DIR = ""
