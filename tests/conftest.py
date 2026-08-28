@@ -37,6 +37,7 @@ def mods_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     mods_path = tmp_path / "Mods"
     mods_path.mkdir()
     monkeypatch.setattr(config, "CELESTE_DIR", str(tmp_path))
+    monkeypatch.setattr(config, "MOD_SOURCE", "wegfan")
     return mods_path
 
 

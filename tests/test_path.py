@@ -223,10 +223,10 @@ def test_database_path_may_be_missing_but_must_not_be_a_directory(
 ):
     celeste_dir = _make_celeste_dir(tmp_path / "game", with_mods=True)
     monkeypatch.setattr(config, "CELESTE_DIR", str(celeste_dir))
-    db_path = celeste_path.get_mod_db_path()
+    db_path = celeste_path.get_mod_db_path("celeste_mod_db.wegfan.json")
 
-    assert celeste_path.validate_mod_db_path() == db_path
+    assert celeste_path.validate_mod_db_path("celeste_mod_db.wegfan.json") == db_path
 
     db_path.mkdir()
     with pytest.raises(celeste_path.CelestePathError, match="expected a file"):
-        celeste_path.validate_mod_db_path()
+        celeste_path.validate_mod_db_path("celeste_mod_db.wegfan.json")

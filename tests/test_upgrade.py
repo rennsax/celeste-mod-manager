@@ -1,19 +1,20 @@
 from pathlib import Path
-from types import SimpleNamespace
-
 from src import mod_manager
 from src.cli import CelesteModCLI
+from src.mod_source import ModInfo, ModSourceName
 
 
 def _mod_info(name: str, version: str, xx_hashes: list[str] | None = None):
-    return SimpleNamespace(
+    return ModInfo(
+        source=ModSourceName.WEGFAN,
         name=name,
         version=version,
-        xxHash=xx_hashes if xx_hashes is not None else ["0" * 16],
-        submissionFile=SimpleNamespace(
-            url=f"https://example.invalid/{name}.zip",
-            size=100,
-        ),
+        xxhashes=tuple(xx_hashes if xx_hashes is not None else ["0" * 16]),
+        download_url=f"https://celeste.weg.fan/api/v2/mod/download/{name}",
+        size=100,
+        page_url=None,
+        downloads=None,
+        remote_file_id=None,
     )
 
 
@@ -286,7 +287,7 @@ def test_update_mod_uses_downloaded_archive_version_when_database_is_stale(
     def fake_urlretrieve(url, filepath, reporthook=None):
         Path(filepath).write_bytes(source_path.read_bytes())
 
-    monkeypatch.setattr(mod_manager.urllib.request, "urlretrieve", fake_urlretrieve)
+    monkeypatch.setattr(mod_manager, "_retrieve_download", fake_urlretrieve)
 
     result = mod_manager.update_mod(installed_mod)
     updated_mod, status = result.mod, result.status
@@ -360,7 +361,7 @@ def test_update_mod_reports_checksum_failure_separately(
     def fake_urlretrieve(url, filepath, reporthook=None):
         Path(filepath).write_bytes(b"unexpected complete download")
 
-    monkeypatch.setattr(mod_manager.urllib.request, "urlretrieve", fake_urlretrieve)
+    monkeypatch.setattr(mod_manager, "_retrieve_download", fake_urlretrieve)
 
     result = mod_manager.update_mod(old_mod)
     updated_mod, status = result.mod, result.status

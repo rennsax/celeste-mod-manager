@@ -1,7 +1,7 @@
 from pathlib import Path
 from types import SimpleNamespace
 
-from src import mod_db, mod_manager
+from src import mod_manager, mod_source
 from src.cli import CelesteModCLI
 
 
@@ -13,7 +13,7 @@ def _installed_mod(mods_dir: Path, mod_zip_factory, filename: str, name: str):
 
 
 def _mod_info(name: str, version: str, xx_hashes: list[str]):
-    return SimpleNamespace(name=name, version=version, xxHash=xx_hashes)
+    return SimpleNamespace(name=name, version=version, xxhashes=tuple(xx_hashes))
 
 
 def test_get_update_blacklisted_mod_filenames_ignores_comments_and_blank_lines(
@@ -41,15 +41,15 @@ def test_load_update_mod_index_forces_one_database_refresh(monkeypatch):
     mod_list = [{"name": "Current"}]
     expected_index = {"Current": object()}
 
-    def fake_get_mod_db(url: str, force_update: bool = False):
-        calls.append((url, force_update))
+    def fake_get_mod_db(*, force_update: bool = False):
+        calls.append(force_update)
         return mod_list
 
-    monkeypatch.setattr(mod_db, "get_mod_db", fake_get_mod_db)
-    monkeypatch.setattr(mod_db, "index_mod_infos", lambda entries: expected_index)
+    monkeypatch.setattr(mod_source, "get_mod_db", fake_get_mod_db)
+    monkeypatch.setattr(mod_source, "index_mod_infos", lambda entries: expected_index)
 
     assert CelesteModCLI()._load_update_mod_index() is expected_index
-    assert calls == [(f"{mod_db.config.WEGFAN_API_URL}/mod/list", True)]
+    assert calls == [True]
 
 
 def test_load_update_mod_index_warns_and_uses_cache_on_refresh_failure(
@@ -58,12 +58,12 @@ def test_load_update_mod_index_warns_and_uses_cache_on_refresh_failure(
     cached_list = [{"name": "Cached"}]
     expected_index = {"Cached": object()}
     monkeypatch.setattr(
-        mod_db,
+        mod_source,
         "get_mod_db",
         lambda *args, **kwargs: (_ for _ in ()).throw(OSError("offline")),
     )
-    monkeypatch.setattr(mod_db, "get_cached_mod_db", lambda: cached_list)
-    monkeypatch.setattr(mod_db, "index_mod_infos", lambda entries: expected_index)
+    monkeypatch.setattr(mod_source, "get_cached_mod_db", lambda: cached_list)
+    monkeypatch.setattr(mod_source, "index_mod_infos", lambda entries: expected_index)
 
     assert CelesteModCLI()._load_update_mod_index() is expected_index
     assert capsys.readouterr().err == (
@@ -74,12 +74,12 @@ def test_load_update_mod_index_warns_and_uses_cache_on_refresh_failure(
 
 def test_load_update_mod_index_fails_without_usable_cache(monkeypatch, capsys):
     monkeypatch.setattr(
-        mod_db,
+        mod_source,
         "get_mod_db",
         lambda *args, **kwargs: (_ for _ in ()).throw(OSError("offline")),
     )
     monkeypatch.setattr(
-        mod_db,
+        mod_source,
         "get_cached_mod_db",
         lambda: (_ for _ in ()).throw(ValueError("invalid cache")),
     )

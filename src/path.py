@@ -91,8 +91,8 @@ def get_mods_dir() -> Path:
     return get_configured_celeste_dir() / "Mods"
 
 
-def get_mod_db_path() -> Path:
-    return get_mods_dir() / "celeste_mod_db.json"
+def get_mod_db_path(cache_filename: str) -> Path:
+    return get_mods_dir() / cache_filename
 
 
 def validate_mods_dir() -> Path:
@@ -119,8 +119,8 @@ def validate_mods_dir() -> Path:
     return mods_dir
 
 
-def validate_mod_db_path() -> Path:
-    mod_db_path = get_mod_db_path()
+def validate_mod_db_path(cache_filename: str) -> Path:
+    mod_db_path = get_mod_db_path(cache_filename)
     try:
         if mod_db_path.exists() and not mod_db_path.is_file():
             entry_type = (

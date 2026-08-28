@@ -9,7 +9,7 @@ from typing import Sequence
 
 from loguru import logger
 
-from . import config, everest_manager, mod_db, mod_manager
+from . import everest_manager, mod_manager, mod_source
 from .operation import IssueKind, IssueSeverity, OperationIssue, has_errors
 from .path import get_configured_celeste_dir, get_mods_dir
 
@@ -27,7 +27,7 @@ class _UpdateCheckStatus(Enum):
 class _UpdateCheckEntry:
     mod: mod_manager.Mod
     status: _UpdateCheckStatus
-    mod_info: mod_db.ModInfo | None = None
+    mod_info: mod_source.ModInfo | None = None
     error: OSError | None = None
 
 
@@ -376,10 +376,9 @@ class CelesteModCLI:
         self._render_issues(scan_result.issues)
         return scan_result
 
-    def _load_update_mod_index(self) -> dict[str, mod_db.ModInfo] | None:
-        url = f"{config.WEGFAN_API_URL}/mod/list"
+    def _load_update_mod_index(self) -> dict[str, mod_source.ModInfo] | None:
         try:
-            mod_list = mod_db.get_mod_db(url, force_update=True)
+            mod_list = mod_source.get_mod_db(force_update=True)
         except Exception as refresh_error:
             print(
                 "WARNING: failed to refresh the local mod database: "
@@ -387,7 +386,7 @@ class CelesteModCLI:
                 file=sys.stderr,
             )
             try:
-                mod_list = mod_db.get_cached_mod_db()
+                mod_list = mod_source.get_cached_mod_db()
             except Exception as cache_error:
                 print(
                     "ERROR: failed to load the local mod database cache: "
@@ -397,7 +396,7 @@ class CelesteModCLI:
                 return None
 
         try:
-            return mod_db.index_mod_infos(mod_list)
+            return mod_source.index_mod_infos(mod_list)
         except Exception as e:
             print(
                 f"ERROR: failed to parse the local mod database: {e}",
@@ -477,7 +476,7 @@ class CelesteModCLI:
 
         pattern = args[0]
         try:
-            found_mods = mod_db.search_mod_by_name(pattern)
+            found_mods = mod_source.search_mod_by_name(pattern)
         except Exception as e:
             logger.opt(exception=e).debug("Failed to load the local mod database.")
             print(
@@ -493,7 +492,7 @@ class CelesteModCLI:
         print("-" * 40)
 
         for mod in found_mods:
-            mod_db.pretty_print_mod_info(mod)
+            mod_source.pretty_print_mod_info(mod)
             print("-" * 40)
         return 0
 
@@ -572,7 +571,7 @@ class CelesteModCLI:
         update_available_count = 0
         skipped_count = 0
         blacklisted_count = 0
-        version_warnings: list[tuple[mod_manager.Mod, mod_db.ModInfo]] = []
+        version_warnings: list[tuple[mod_manager.Mod, mod_source.ModInfo]] = []
 
         print("-" * 72)
         print(f"{'Status':<{status_width}}  {'Mod':<{name_width}}  Version")
@@ -659,9 +658,7 @@ class CelesteModCLI:
     def update_db(self, args: list[str]) -> int:
         """Force update the local mod database from the server."""
         try:
-            _ = mod_db.get_mod_db(
-                f"{config.WEGFAN_API_URL}/mod/list", force_update=True
-            )
+            _ = mod_source.get_mod_db(force_update=True)
             print("Successfully updated the local mod database.")
             return 0
         except Exception as e:
@@ -846,7 +843,7 @@ class CelesteModCLI:
     def _upgrade_mod(
         self,
         mod: mod_manager.Mod,
-        mod_info: mod_db.ModInfo | None,
+        mod_info: mod_source.ModInfo | None,
         display_name: str | None = None,
     ) -> int:
         mod_name = display_name if display_name is not None else mod.name

@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from src import config, main, mod_db, path as celeste_path
+from src import config, main, mod_source, path as celeste_path
 from src.cli import CelesteModCLI
 
 
@@ -11,6 +11,7 @@ def _prepare_main(monkeypatch, tmp_path: Path, *args: str) -> None:
     (tmp_path / "Celeste.exe").touch(exist_ok=True)
     (tmp_path / "Mods").mkdir(exist_ok=True)
     monkeypatch.setattr(config, "CELESTE_DIR", "")
+    monkeypatch.setattr(config, "MOD_SOURCE", "")
     monkeypatch.setattr(celeste_path, "find_celeste_dir_from_steam", lambda: tmp_path)
     monkeypatch.setattr(sys, "argv", ["celeste-mod-manager", *args])
 
@@ -23,6 +24,54 @@ def test_help_lists_apply_as_a_regular_command(capsys):
     assert "Experimental commands:" not in captured.err
     for command in ("install", "uninstall", "enable", "disable"):
         assert f"    {command} " not in captured.err
+    assert "--mod-source <source>" in captured.err
+
+
+def test_database_command_defaults_to_wegfan_source(
+    tmp_path: Path, monkeypatch, capsys
+):
+    _prepare_main(monkeypatch, tmp_path, "search", "missing")
+    monkeypatch.setattr(mod_source, "search_mod_by_name", lambda _pattern: [])
+
+    assert main.main() == 0
+    assert config.MOD_SOURCE == "wegfan"
+    assert capsys.readouterr().out == "No mods found.\n"
+
+
+def test_cli_mod_source_override_selects_gamebanana(
+    tmp_path: Path, monkeypatch, capsys
+):
+    _prepare_main(
+        monkeypatch,
+        tmp_path,
+        "--mod-source",
+        "gamebanana",
+        "search",
+        "missing",
+    )
+    monkeypatch.setattr(mod_source, "search_mod_by_name", lambda _pattern: [])
+
+    assert main.main() == 0
+    assert config.MOD_SOURCE == "gamebanana"
+    assert capsys.readouterr().out == "No mods found.\n"
+
+
+def test_invalid_cli_mod_source_is_a_stable_user_error(
+    tmp_path: Path, monkeypatch, capsys
+):
+    _prepare_main(
+        monkeypatch,
+        tmp_path,
+        "--mod-source",
+        "unknown",
+        "search",
+        "missing",
+    )
+
+    assert main.main() == 1
+    assert capsys.readouterr().err == (
+        "ERROR: invalid mod source 'unknown'; expected one of: wegfan, gamebanana\n"
+    )
 
 
 @pytest.mark.parametrize("command", ["install", "uninstall", "enable", "disable"])
@@ -42,7 +91,7 @@ def test_search_requires_pattern_without_reading_database(monkeypatch, capsys):
     def fail_if_called(_pattern):
         raise AssertionError("search must not read the database without a pattern")
 
-    monkeypatch.setattr(mod_db, "search_mod_by_name", fail_if_called)
+    monkeypatch.setattr(mod_source, "search_mod_by_name", fail_if_called)
 
     assert CelesteModCLI().search([]) == 1
 
@@ -52,7 +101,7 @@ def test_search_requires_pattern_without_reading_database(monkeypatch, capsys):
 
 
 def test_search_returns_success_when_no_mods_match(monkeypatch, capsys):
-    monkeypatch.setattr(mod_db, "search_mod_by_name", lambda _pattern: [])
+    monkeypatch.setattr(mod_source, "search_mod_by_name", lambda _pattern: [])
 
     assert CelesteModCLI().search(["missing"]) == 0
 
@@ -63,9 +112,9 @@ def test_search_returns_success_when_no_mods_match(monkeypatch, capsys):
 
 def test_search_returns_success_and_preserves_result_output(monkeypatch, capsys):
     found_mod = object()
-    monkeypatch.setattr(mod_db, "search_mod_by_name", lambda _pattern: [found_mod])
+    monkeypatch.setattr(mod_source, "search_mod_by_name", lambda _pattern: [found_mod])
     monkeypatch.setattr(
-        mod_db,
+        mod_source,
         "pretty_print_mod_info",
         lambda mod: print("mod details") if mod is found_mod else None,
     )
@@ -84,7 +133,7 @@ def test_search_returns_success_and_preserves_result_output(monkeypatch, capsys)
 
 def test_search_reports_database_failure_without_internal_error(monkeypatch, capsys):
     monkeypatch.setattr(
-        mod_db,
+        mod_source,
         "search_mod_by_name",
         lambda _pattern: (_ for _ in ()).throw(OSError("database is read-only")),
     )
@@ -101,7 +150,7 @@ def test_search_reports_database_failure_without_internal_error(monkeypatch, cap
 def test_main_propagates_search_exit_code(tmp_path: Path, monkeypatch, capsys):
     _prepare_main(monkeypatch, tmp_path, "search")
     monkeypatch.setattr(
-        mod_db,
+        mod_source,
         "search_mod_by_name",
         lambda _pattern: pytest.fail("database lookup should not run"),
     )
@@ -229,7 +278,7 @@ def test_database_directory_fails_before_database_command_dispatch(
     (tmp_path / "Celeste.exe").touch()
     mods_dir = tmp_path / "Mods"
     mods_dir.mkdir()
-    (mods_dir / "celeste_mod_db.json").mkdir()
+    (mods_dir / "celeste_mod_db.wegfan.json").mkdir()
     monkeypatch.setattr(config, "CELESTE_DIR", str(tmp_path))
     monkeypatch.setattr(
         main,
@@ -240,6 +289,36 @@ def test_database_directory_fails_before_database_command_dispatch(
 
     assert main.main() == 1
     assert "expected a file, found a directory" in capsys.readouterr().err
+
+
+def test_database_path_validation_uses_selected_source(
+    tmp_path: Path, monkeypatch, capsys
+):
+    (tmp_path / "Celeste.exe").touch()
+    mods_dir = tmp_path / "Mods"
+    mods_dir.mkdir()
+    (mods_dir / "celeste_mod_db.gamebanana.json").mkdir()
+    monkeypatch.setattr(config, "CELESTE_DIR", str(tmp_path))
+    monkeypatch.setattr(config, "MOD_SOURCE", "")
+    monkeypatch.setattr(
+        main,
+        "CelesteModCLI",
+        lambda: pytest.fail("invalid selected database path must fail first"),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "celeste-mod-manager",
+            "--mod-source",
+            "gamebanana",
+            "search",
+            "CelesteTAS",
+        ],
+    )
+
+    assert main.main() == 1
+    assert "celeste_mod_db.gamebanana.json" in capsys.readouterr().err
 
 
 def test_cli_celeste_dir_overrides_configured_path(tmp_path: Path, monkeypatch, capsys):

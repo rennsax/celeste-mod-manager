@@ -1,8 +1,7 @@
 from pathlib import Path
-from types import SimpleNamespace
-
-from src import mod_manager
+from src import config, mod_manager
 from src.cli import CelesteModCLI
+from src.mod_source import ModInfo, ModSourceName
 
 _EXPECTED_BLACKLIST_HEADER = (
     "# This is the blacklist. Lines starting with # are ignored.\n"
@@ -28,14 +27,16 @@ def _dep(name: str, version: str = "1.0.0") -> dict[str, str]:
 
 
 def _mod_info(name: str, version: str = "1.0.0", xx_hashes: list[str] | None = None):
-    return SimpleNamespace(
+    return ModInfo(
+        source=ModSourceName.WEGFAN,
         name=name,
         version=version,
-        xxHash=xx_hashes if xx_hashes is not None else ["0" * 16],
-        submissionFile=SimpleNamespace(
-            url=f"https://example.invalid/{name}.zip",
-            size=100,
-        ),
+        xxhashes=tuple(xx_hashes if xx_hashes is not None else ["0" * 16]),
+        download_url=f"https://celeste.weg.fan/api/v2/mod/download/{name}",
+        size=100,
+        page_url=None,
+        downloads=None,
+        remote_file_id=None,
     )
 
 
@@ -95,6 +96,23 @@ def test_ensure_mod_ignores_legacy_root_metadata(mods_dir: Path, mod_zip_factory
     assert (mods_dir / "installed_mods.yml").read_bytes() == legacy_metadata
 
 
+def test_source_switch_reuses_existing_valid_archive(
+    mods_dir: Path, mod_zip_factory, monkeypatch
+):
+    mod_zip_factory(mods_dir, "Existing.zip", "Existing")
+    monkeypatch.setattr(config, "MOD_SOURCE", "gamebanana")
+
+    def fail_if_queried(_name):
+        raise AssertionError("an existing valid ZIP must not trigger a source lookup")
+
+    monkeypatch.setattr(mod_manager, "get_mod_info", fail_if_queried)
+
+    result = mod_manager.ensure_mod("Existing")
+
+    assert result.status == mod_manager.EnsureModStatus.ALREADY_EXISTS
+    assert result.mod is not None
+
+
 def test_apply_downloads_missing_root_and_dependency(
     mods_dir: Path, mod_zip_factory, monkeypatch
 ):
@@ -134,7 +152,7 @@ def test_apply_reports_checksum_failure_for_missing_root(
     def fake_urlretrieve(url, filepath, reporthook=None):
         Path(filepath).write_bytes(b"unexpected complete root download")
 
-    monkeypatch.setattr(mod_manager.urllib.request, "urlretrieve", fake_urlretrieve)
+    monkeypatch.setattr(mod_manager, "_retrieve_download", fake_urlretrieve)
 
     plan = mod_manager.build_apply_plan(["Root"])
 
@@ -155,7 +173,7 @@ def test_apply_reports_checksum_failure_for_dependency(
     def fake_urlretrieve(url, filepath, reporthook=None):
         Path(filepath).write_bytes(b"unexpected complete dependency download")
 
-    monkeypatch.setattr(mod_manager.urllib.request, "urlretrieve", fake_urlretrieve)
+    monkeypatch.setattr(mod_manager, "_retrieve_download", fake_urlretrieve)
 
     plan = mod_manager.build_apply_plan(["Root"])
 

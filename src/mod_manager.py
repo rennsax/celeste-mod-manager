@@ -1,3 +1,4 @@
+import http.client
 import os
 import sys
 import tempfile
@@ -13,8 +14,9 @@ from loguru import logger
 from rich.console import Console
 from rich.progress import BarColumn, Progress, TextColumn
 
+from . import mod_source
 from .mod import Mod
-from .mod_db import ModInfo, get_mod_info
+from .mod_source import ModInfo, get_mod_info
 from .operation import IssueKind, IssueSeverity, OperationIssue, has_errors
 from .path import get_mods_dir
 
@@ -60,7 +62,7 @@ def _normalize_xxhash(value: object) -> str | None:
 
 
 def _get_valid_mod_xxhashes(mod_info: ModInfo) -> list[str]:
-    values = getattr(mod_info, "xxHash", None)
+    values = getattr(mod_info, "xxhashes", None)
     if not isinstance(values, (list, tuple)):
         return []
     return [
@@ -71,7 +73,7 @@ def _get_valid_mod_xxhashes(mod_info: ModInfo) -> list[str]:
 
 
 def _get_expected_download_xxhash(mod_info: ModInfo) -> str | None:
-    values = getattr(mod_info, "xxHash", None)
+    values = getattr(mod_info, "xxhashes", None)
     if not isinstance(values, (list, tuple)) or not values:
         return None
     return _normalize_xxhash(values[0])
@@ -168,8 +170,33 @@ def _download_progress(expected_size: int | None = None):
         yield reporthook
 
 
+def _retrieve_download(
+    request: urllib.request.Request,
+    filepath: str,
+    reporthook,
+) -> None:
+    with urllib.request.urlopen(request) as response, open(filepath, "wb") as output:
+        headers = response.info()
+        content_length = headers.get("Content-Length")
+        total_size = int(content_length) if content_length is not None else -1
+        block_size = 1024 * 8
+        block_count = 0
+        bytes_read = 0
+        reporthook(block_count, block_size, total_size)
+        while block := response.read(block_size):
+            output.write(block)
+            block_count += 1
+            bytes_read += len(block)
+            reporthook(block_count, block_size, total_size)
+    if total_size >= 0 and bytes_read < total_size:
+        raise urllib.error.ContentTooShortError(
+            f"retrieval incomplete: got only {bytes_read} out of {total_size} bytes",
+            (filepath, headers),
+        )
+
+
 def _download_mod(mod_info: ModInfo) -> DownloadResult:
-    if not mod_info or not mod_info.submissionFile:
+    if not isinstance(mod_info, ModInfo):
         return DownloadResult(
             issues=[
                 OperationIssue(
@@ -186,18 +213,36 @@ def _download_mod(mod_info: ModInfo) -> DownloadResult:
     if expected_xxhash is None:
         return DownloadResult(issues=[_missing_expected_xxhash_issue(mod_info.name)])
 
-    url = mod_info.submissionFile.url
+    try:
+        request = mod_source.get_download_request(mod_info)
+    except Exception as e:
+        return DownloadResult(
+            issues=[
+                OperationIssue(
+                    severity=IssueSeverity.ERROR,
+                    kind=IssueKind.UNEXPECTED,
+                    operation="build download request",
+                    subject=mod_info.name,
+                    detail=str(e),
+                )
+            ]
+        )
     requested_filename = f"{mod_info.name}-{mod_info.version}.zip"
     mods_dir = get_mods_dir()
 
-    expected_size = mod_info.submissionFile.size
+    expected_size = mod_info.size
     print(f"Collecting {mod_info.name}")
     print(f"  Downloading {requested_filename} ({_format_size(expected_size)})")
-    logger.debug(f"Downloading '{mod_info.name}' from '{url}'...")
+    logger.debug(
+        f"Downloading '{mod_info.name}' from '{request.full_url}' "
+        f"using the {mod_info.source.value} source..."
+    )
     last_error: Exception | None = None
     retryable_errors = (
         urllib.error.URLError,
         urllib.error.ContentTooShortError,
+        http.client.IncompleteRead,
+        http.client.RemoteDisconnected,
         TimeoutError,
         ConnectionError,
     )
@@ -241,10 +286,10 @@ def _download_mod(mod_info: ModInfo) -> DownloadResult:
             temporary_filename = os.path.basename(temporary_filepath)
             try:
                 with _download_progress(expected_size) as reporthook:
-                    urllib.request.urlretrieve(
-                        url,
+                    _retrieve_download(
+                        request,
                         temporary_filepath,
-                        reporthook=reporthook,
+                        reporthook,
                     )
             except retryable_errors as e:
                 last_error = e

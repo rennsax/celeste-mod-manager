@@ -2,11 +2,10 @@ import io
 import sys
 import urllib.error
 from pathlib import Path
-from types import SimpleNamespace
-
 import xxhash
 
-from src import mod_manager
+from src import config, mod_manager
+from src.mod_source import ModInfo, ModSourceName
 
 
 def _dep(name: str, version: str = "1.0.0") -> dict[str, str]:
@@ -18,15 +17,22 @@ def _mod_info(
     version: str = "1.0.0",
     size: int = 100,
     xx_hashes: list[str] | None = None,
+    source: ModSourceName = ModSourceName.WEGFAN,
 ):
-    return SimpleNamespace(
+    if source == ModSourceName.GAMEBANANA:
+        download_url = "https://gamebanana.com/mmdl/123"
+    else:
+        download_url = f"https://celeste.weg.fan/api/v2/mod/download/{name}"
+    return ModInfo(
+        source=source,
         name=name,
         version=version,
-        xxHash=xx_hashes if xx_hashes is not None else ["0" * 16],
-        submissionFile=SimpleNamespace(
-            url=f"https://example.invalid/{name}.zip",
-            size=size,
-        ),
+        xxhashes=tuple(xx_hashes if xx_hashes is not None else ["0" * 16]),
+        download_url=download_url,
+        size=size,
+        page_url=None,
+        downloads=None,
+        remote_file_id=None,
     )
 
 
@@ -48,7 +54,7 @@ def test_download_mod_prints_progress(
         path = Path(filepath)
         mod_zip_factory(path.parent, path.name, "DownloadedMod", "1.0.0")
 
-    monkeypatch.setattr(mod_manager.urllib.request, "urlretrieve", fake_urlretrieve)
+    monkeypatch.setattr(mod_manager, "_retrieve_download", fake_urlretrieve)
     monkeypatch.setattr(mod_manager, "_calculate_xxhash64", lambda _path: "0" * 16)
 
     result = mod_manager._download_mod(_mod_info("DownloadedMod"))
@@ -63,6 +69,48 @@ def test_download_mod_prints_progress(
     saved = output.index("  Saved DownloadedMod-1.0.0.zip\n")
     assert collecting < downloading < completed < saved
     assert not list(mods_dir.glob("*.download.zip"))
+
+
+def test_download_mod_uses_gamebanana_request_headers_without_fallback(
+    mods_dir: Path, mod_zip_factory, monkeypatch
+):
+    monkeypatch.setattr(config, "MOD_SOURCE", "gamebanana")
+    observed_requests = []
+
+    def fake_retrieve(request, filepath, reporthook):
+        observed_requests.append(request)
+        path = Path(filepath)
+        mod_zip_factory(path.parent, path.name, "DownloadedMod", "1.0.0")
+
+    monkeypatch.setattr(mod_manager, "_retrieve_download", fake_retrieve)
+    monkeypatch.setattr(mod_manager, "_calculate_xxhash64", lambda _path: "0" * 16)
+
+    result = mod_manager._download_mod(
+        _mod_info("DownloadedMod", source=ModSourceName.GAMEBANANA)
+    )
+
+    assert result.ok
+    assert len(observed_requests) == 1
+    request = observed_requests[0]
+    assert request.full_url == "https://gamebanana.com/mmdl/123"
+    assert request.get_header("Accept") == "application/octet-stream"
+    assert request.get_header("User-agent").startswith("celeste-mod-manager/")
+
+
+def test_download_mod_rejects_cross_source_info_before_transport(
+    mods_dir: Path, monkeypatch
+):
+    monkeypatch.setattr(config, "MOD_SOURCE", "gamebanana")
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("cross-source download must not reach the transport")
+
+    monkeypatch.setattr(mod_manager, "_retrieve_download", fail_if_called)
+
+    result = mod_manager._download_mod(_mod_info("DownloadedMod"))
+
+    assert not result.ok
+    assert "current mod source is 'gamebanana'" in result.issues[0].detail
 
 
 def test_download_progress_uses_ascii_bar_for_gbk_stdout(monkeypatch):
@@ -128,7 +176,7 @@ def test_download_mod_retries_then_publishes_valid_archive(
         path = Path(filepath)
         mod_zip_factory(path.parent, path.name, "DownloadedMod", "1.0.0")
 
-    monkeypatch.setattr(mod_manager.urllib.request, "urlretrieve", fake_urlretrieve)
+    monkeypatch.setattr(mod_manager, "_retrieve_download", fake_urlretrieve)
     monkeypatch.setattr(mod_manager, "_calculate_xxhash64", lambda _path: "0" * 16)
 
     result = mod_manager._download_mod(_mod_info("DownloadedMod"))
@@ -156,7 +204,7 @@ def test_download_mod_retries_content_too_short(
         path = Path(filepath)
         mod_zip_factory(path.parent, path.name, "DownloadedMod", "1.0.0")
 
-    monkeypatch.setattr(mod_manager.urllib.request, "urlretrieve", fake_urlretrieve)
+    monkeypatch.setattr(mod_manager, "_retrieve_download", fake_urlretrieve)
     monkeypatch.setattr(mod_manager, "_calculate_xxhash64", lambda _path: "0" * 16)
 
     result = mod_manager._download_mod(_mod_info("DownloadedMod"))
@@ -180,7 +228,7 @@ def test_download_mod_rejects_invalid_archive_without_retry(
         attempts += 1
         Path(filepath).write_bytes(invalid_contents)
 
-    monkeypatch.setattr(mod_manager.urllib.request, "urlretrieve", fake_urlretrieve)
+    monkeypatch.setattr(mod_manager, "_retrieve_download", fake_urlretrieve)
 
     result = mod_manager._download_mod(
         _mod_info("DownloadedMod", xx_hashes=[expected_xxhash])
@@ -202,7 +250,7 @@ def test_download_mod_failure_preserves_existing_archive(
     def fake_urlretrieve(url, filepath, reporthook=None):
         raise urllib.error.URLError("temporary network failure")
 
-    monkeypatch.setattr(mod_manager.urllib.request, "urlretrieve", fake_urlretrieve)
+    monkeypatch.setattr(mod_manager, "_retrieve_download", fake_urlretrieve)
 
     result = mod_manager._download_mod(_mod_info("DownloadedMod"))
 
@@ -225,7 +273,7 @@ def test_download_mod_checksum_failure_does_not_retry(
         attempts += 1
         Path(filepath).write_bytes(b"complete but unexpected contents")
 
-    monkeypatch.setattr(mod_manager.urllib.request, "urlretrieve", fake_urlretrieve)
+    monkeypatch.setattr(mod_manager, "_retrieve_download", fake_urlretrieve)
 
     result = mod_manager._download_mod(_mod_info("DownloadedMod"))
 
@@ -245,7 +293,7 @@ def test_download_mod_requires_primary_xxhash_before_network(
     def fail_if_downloaded(*args, **kwargs):
         raise AssertionError("download must not start without a primary xxHash")
 
-    monkeypatch.setattr(mod_manager.urllib.request, "urlretrieve", fail_if_downloaded)
+    monkeypatch.setattr(mod_manager, "_retrieve_download", fail_if_downloaded)
 
     result = mod_manager._download_mod(_mod_info("DownloadedMod", xx_hashes=[]))
 
@@ -263,7 +311,7 @@ def test_download_mod_verifies_only_primary_xxhash(mods_dir: Path, monkeypatch):
     def fake_urlretrieve(url, filepath, reporthook=None):
         Path(filepath).write_bytes(contents)
 
-    monkeypatch.setattr(mod_manager.urllib.request, "urlretrieve", fake_urlretrieve)
+    monkeypatch.setattr(mod_manager, "_retrieve_download", fake_urlretrieve)
 
     result = mod_manager._download_mod(
         _mod_info("DownloadedMod", xx_hashes=["0" * 16, actual_xxhash])
@@ -287,7 +335,7 @@ def test_download_mod_uses_archive_version_when_database_is_stale(
     def fake_urlretrieve(url, filepath, reporthook=None):
         Path(filepath).write_bytes(source_path.read_bytes())
 
-    monkeypatch.setattr(mod_manager.urllib.request, "urlretrieve", fake_urlretrieve)
+    monkeypatch.setattr(mod_manager, "_retrieve_download", fake_urlretrieve)
 
     result = mod_manager._download_mod(
         _mod_info("DownloadedMod", version="1.1.0", xx_hashes=[expected_xxhash])
@@ -318,7 +366,7 @@ def test_download_mod_rejects_archive_with_different_mod_name(
         path = Path(filepath)
         mod_zip_factory(path.parent, path.name, "DifferentMod", "1.0.0")
 
-    monkeypatch.setattr(mod_manager.urllib.request, "urlretrieve", fake_urlretrieve)
+    monkeypatch.setattr(mod_manager, "_retrieve_download", fake_urlretrieve)
     monkeypatch.setattr(mod_manager, "_calculate_xxhash64", lambda _path: "0" * 16)
 
     result = mod_manager._download_mod(_mod_info("DownloadedMod"))
@@ -457,7 +505,7 @@ def test_ensure_mod_reports_checksum_failure_status(
     def fake_urlretrieve(url, filepath, reporthook=None):
         Path(filepath).write_bytes(b"unexpected complete download")
 
-    monkeypatch.setattr(mod_manager.urllib.request, "urlretrieve", fake_urlretrieve)
+    monkeypatch.setattr(mod_manager, "_retrieve_download", fake_urlretrieve)
 
     result = mod_manager.ensure_mod("DownloadedMod")
 

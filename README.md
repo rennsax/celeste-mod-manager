@@ -5,6 +5,7 @@ A command-line tool for managing Celeste mods.
 ## Features
 
 - Search the mod database
+- Select either the WEGFAN or official GameBanana mod source
 - Apply a declarative mod requirement file
 - Resolve and download dependencies
 - List installed mods
@@ -62,6 +63,28 @@ celeste-mod-manager gc
 ```
 
 Legacy `Mods/installed_mods.yml` files are ignored and left untouched.
+
+## Mod sources
+
+WEGFAN is selected by default. To use the official GameBanana catalog and file
+downloads for a command, place the global option before the command name:
+
+```sh
+celeste-mod-manager --mod-source gamebanana search CelesteTAS
+celeste-mod-manager --mod-source gamebanana apply
+celeste-mod-manager --mod-source gamebanana upgrade ALL
+```
+
+Set `config.MOD_SOURCE` to `"wegfan"` or `"gamebanana"` to choose a persistent
+default. A command uses only its selected source: a missing catalog entry,
+network failure, checksum mismatch, or invalid archive never falls back to the
+other source. Existing valid archives in `Mods/` can still be reused after a
+source switch.
+
+The normalized catalogs are cached independently as
+`Mods/celeste_mod_db.wegfan.json` and
+`Mods/celeste_mod_db.gamebanana.json`. The legacy
+`Mods/celeste_mod_db.json` file is ignored and left untouched.
 
 ## License
 

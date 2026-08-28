@@ -2,7 +2,7 @@ import sys
 from pathlib import Path
 from loguru import logger
 
-from . import config
+from . import config, mod_source
 from .cli import CelesteModCLI
 from .path import (
     CelestePathError,
@@ -38,6 +38,7 @@ _DATABASE_COMMANDS = {"search", "apply", "check-updates", "update-db", "upgrade"
 class GlobalOptions:
     celeste_dir: Path | None = None
     log_level: str = config.DEFAULT_LOG_LEVEL
+    mod_source: str | None = None
 
 
 def cmd_help():
@@ -64,6 +65,8 @@ Commands:
 Options:
     --celeste-dir <path>  Specify the Celeste directory, overriding config and
                           automatic discovery.
+    --mod-source <source> Select the mod catalog and download source
+                          (wegfan or gamebanana; default: wegfan).
     --log-level <level>   Set the log level (TRACE, DEBUG, INFO, WARNING, ERROR, CRITICAL).""",
         file=sys.stderr,
     )
@@ -83,6 +86,13 @@ def _parse_global_args(args: list[str]) -> tuple[list[str], GlobalOptions, bool]
                 print("ERROR: --celeste-dir requires a path value.", file=sys.stderr)
                 sys.exit(1)
             options.celeste_dir = Path(args[i + 1]).expanduser()
+            i += 2
+            continue
+        elif arg == "--mod-source":
+            if i + 1 >= len(args):
+                print("ERROR: --mod-source requires a value.", file=sys.stderr)
+                sys.exit(1)
+            options.mod_source = args[i + 1]
             i += 2
             continue
         elif arg == "--help" or arg == "-h":
@@ -174,14 +184,16 @@ def _run_cli() -> int:
 
     logger.debug(
         f"Global options: celeste_dir={options.celeste_dir!r}, "
-        f"log_level={options.log_level!r}; Remaining args: {args!r}"
+        f"log_level={options.log_level!r}, mod_source={options.mod_source!r}; "
+        f"Remaining args: {args!r}"
     )
 
     configure_celeste_dir(options.celeste_dir)
     if subcommand != "everest":
         validate_mods_dir()
     if subcommand in _DATABASE_COMMANDS:
-        validate_mod_db_path()
+        mod_source.configure(options.mod_source)
+        validate_mod_db_path(mod_source.get_cache_filename())
 
     return _dispatch_cli(CelesteModCLI(), subcommand, extra_args)
 
@@ -191,6 +203,9 @@ def main() -> int:
         _configure_logger(config.DEFAULT_LOG_LEVEL)
         return _run_cli()
     except CelestePathError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+    except mod_source.InvalidModSourceError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
