@@ -10,6 +10,7 @@ from .path import (
     validate_mod_db_path,
     validate_mods_dir,
 )
+from .output import print_error
 
 _KNOWN_COMMANDS = {
     "search",
@@ -83,14 +84,14 @@ def _parse_global_args(args: list[str]) -> tuple[list[str], GlobalOptions, bool]
 
         if arg == "--celeste-dir":
             if i + 1 >= len(args):
-                print("ERROR: --celeste-dir requires a path value.", file=sys.stderr)
+                print_error("--celeste-dir requires a path value.")
                 sys.exit(1)
             options.celeste_dir = Path(args[i + 1]).expanduser()
             i += 2
             continue
         elif arg == "--mod-source":
             if i + 1 >= len(args):
-                print("ERROR: --mod-source requires a value.", file=sys.stderr)
+                print_error("--mod-source requires a value.")
                 sys.exit(1)
             options.mod_source = args[i + 1]
             i += 2
@@ -100,20 +101,20 @@ def _parse_global_args(args: list[str]) -> tuple[list[str], GlobalOptions, bool]
             sys.exit(0)
         elif arg == "--log-level":
             if i + 1 >= len(args):
-                print("ERROR: --log-level requires a value.", file=sys.stderr)
+                print_error("--log-level requires a value.")
                 sys.exit(1)
             level = args[i + 1].upper()
             if level not in ("TRACE", "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"):
-                print(
-                    f"ERROR: invalid log level '{level}'. Valid levels are: TRACE, DEBUG, INFO, WARNING, ERROR, CRITICAL.",
-                    file=sys.stderr,
+                print_error(
+                    f"invalid log level '{level}'. Valid levels are: TRACE, "
+                    "DEBUG, INFO, WARNING, ERROR, CRITICAL."
                 )
                 sys.exit(1)
             options.log_level = level
             i += 2
             continue
         else:
-            print(f"ERROR: unknown argument '{arg}'", file=sys.stderr)
+            print_error(f"unknown argument '{arg}'")
             sys.exit(1)
 
     return args[i:], options, False
@@ -152,7 +153,7 @@ def _run_cli() -> int:
     # Dispatch
     args, options, parse_error = _parse_global_args(sys.argv[1:])
     if parse_error:
-        print(f"ERROR: failed to parse arguments.", file=sys.stderr)
+        print_error("failed to parse arguments.")
         return 1
 
     if len(args) == 0:
@@ -166,7 +167,7 @@ def _run_cli() -> int:
         return 0
 
     if subcommand not in _KNOWN_COMMANDS:
-        print(f"ERROR: unknown command '{subcommand}'", file=sys.stderr)
+        print_error(f"unknown command '{subcommand}'")
         print()
         cmd_help()
         return 1
@@ -203,20 +204,19 @@ def main() -> int:
         _configure_logger(config.DEFAULT_LOG_LEVEL)
         return _run_cli()
     except CelestePathError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
+        print_error(str(e))
         return 1
     except mod_source.InvalidModSourceError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
+        print_error(str(e))
         return 1
     except KeyboardInterrupt:
         print("Cancelled by user.", file=sys.stderr)
         return 130
     except Exception as e:
         logger.opt(exception=e).debug("Unhandled exception at CLI boundary.")
-        print(
-            "ERROR: an unexpected internal error occurred. "
-            "Re-run with --log-level DEBUG for details.",
-            file=sys.stderr,
+        print_error(
+            "an unexpected internal error occurred. "
+            "Re-run with --log-level DEBUG for details."
         )
         return 1
 

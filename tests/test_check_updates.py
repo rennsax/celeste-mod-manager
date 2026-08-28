@@ -203,7 +203,7 @@ def test_check_updates_warns_when_version_differs_but_hash_matches(
     assert "[OUTDATED]" not in output
     assert "[OK]" in output
     warning = (
-        "\033[93m[WARNING]    \033[0m  LocalNewer  local=1.2.0  "
+        "[WARNING]      LocalNewer  local=1.2.0  "
         "database=1.1.0; xxHash matches, treated as up to date\n"
     )
     assert warning in output

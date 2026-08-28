@@ -11,6 +11,7 @@ from loguru import logger
 
 from . import everest_manager, mod_manager, mod_source
 from .operation import IssueKind, IssueSeverity, OperationIssue, has_errors
+from .output import print_error, print_warning, print_warning_line
 from .path import get_configured_celeste_dir, get_mods_dir
 
 
@@ -197,17 +198,13 @@ class CelesteModCLI:
             self._show_everest_help(prog_name)
             return 0
         if args:
-            print(
-                f"ERROR: unexpected argument(s): {' '.join(args)}. "
-                "The everest command only supports -h and --help.",
-                file=sys.stderr,
+            print_error(
+                f"unexpected argument(s): {' '.join(args)}. "
+                "The everest command only supports -h and --help."
             )
             return 1
         if not sys.stdin.isatty():
-            print(
-                "ERROR: the everest command requires an interactive terminal.",
-                file=sys.stderr,
-            )
+            print_error("the everest command requires an interactive terminal.")
             return 1
 
         celeste_dir = get_configured_celeste_dir()
@@ -216,10 +213,9 @@ class CelesteModCLI:
             self._report_everest_state(celeste_dir, state)
             everest_manager.ensure_supported_platform()
             if state.kind == everest_manager.EverestStateKind.UNKNOWN:
-                print(
-                    "WARNING: could not reliably detect the current Celeste/Everest "
-                    f"state: {state.detail}",
-                    file=sys.stderr,
+                print_warning(
+                    "could not reliably detect the current Celeste/Everest "
+                    f"state: {state.detail}"
                 )
                 if not self._confirm("Continue despite the detection failure? [y/N] "):
                     print("Cancelled Everest installation.")
@@ -233,9 +229,10 @@ class CelesteModCLI:
 
             action = everest_manager.classify_action(state, selected)
             if action == everest_manager.EverestAction.REINSTALL:
-                print(
-                    "WARNING: the selected build is already installed. Reinstalling "
-                    "will overwrite Everest runtime files."
+                print_warning(
+                    "the selected build is already installed. Reinstalling "
+                    "will overwrite Everest runtime files.",
+                    file=sys.stdout,
                 )
                 if not self._confirm("Continue with the reinstall? [y/N] "):
                     print("Cancelled Everest installation.")
@@ -243,10 +240,11 @@ class CelesteModCLI:
             elif action == everest_manager.EverestAction.DOWNGRADE:
                 current = state.version
                 assert current is not None
-                print(
-                    "WARNING: downgrading Everest can make newer mods or settings "
+                print_warning(
+                    "downgrading Everest can make newer mods or settings "
                     f"incompatible ({current.version_string} -> "
-                    f"{selected.version.version_string})."
+                    f"{selected.version.version_string}).",
+                    file=sys.stdout,
                 )
                 if not self._confirm("Continue with the downgrade? [y/N] "):
                     print("Cancelled Everest installation.")
@@ -289,7 +287,7 @@ class CelesteModCLI:
             print("Cancelled Everest installation.")
             return 0
         except everest_manager.EverestError as e:
-            print(f"ERROR: {e}", file=sys.stderr)
+            print_error(str(e))
             return 1
 
         print(
@@ -308,7 +306,6 @@ class CelesteModCLI:
             ),
         )
         for issue in unique_issues:
-            prefix = "WARNING" if issue.severity == IssueSeverity.WARNING else "ERROR"
             detail = issue.detail.rstrip(".")
             chain_suffix = ""
             if len(issue.dependency_chain) > 1:
@@ -369,7 +366,10 @@ class CelesteModCLI:
 
             if issue.hint:
                 message += f" {issue.hint}"
-            print(f"{prefix}: {message}", file=sys.stderr)
+            if issue.severity == IssueSeverity.WARNING:
+                print_warning(message)
+            else:
+                print_error(message)
 
     def _scan_installed_mods(self) -> mod_manager.LocalModScanResult:
         scan_result = mod_manager.scan_installed_mods()
@@ -380,28 +380,22 @@ class CelesteModCLI:
         try:
             mod_list = mod_source.get_mod_db(force_update=True)
         except Exception as refresh_error:
-            print(
-                "WARNING: failed to refresh the local mod database: "
-                f"{refresh_error}. Using the existing cached database.",
-                file=sys.stderr,
+            print_warning(
+                "failed to refresh the local mod database: "
+                f"{refresh_error}. Using the existing cached database."
             )
             try:
                 mod_list = mod_source.get_cached_mod_db()
             except Exception as cache_error:
-                print(
-                    "ERROR: failed to load the local mod database cache: "
-                    f"{cache_error}",
-                    file=sys.stderr,
+                print_error(
+                    f"failed to load the local mod database cache: {cache_error}"
                 )
                 return None
 
         try:
             return mod_source.index_mod_infos(mod_list)
         except Exception as e:
-            print(
-                f"ERROR: failed to parse the local mod database: {e}",
-                file=sys.stderr,
-            )
+            print_error(f"failed to parse the local mod database: {e}")
             return None
 
     def _collect_update_check_entries(self) -> list[_UpdateCheckEntry] | None:
@@ -417,7 +411,7 @@ class CelesteModCLI:
                 mod_manager.get_update_blacklisted_mod_filenames()
             )
         except OSError as e:
-            print(f"ERROR: failed to read update blacklist: {e}", file=sys.stderr)
+            print_error(f"failed to read update blacklist: {e}")
             return None
 
         mod_info_index = self._load_update_mod_index()
@@ -471,7 +465,7 @@ class CelesteModCLI:
     def search(self, args: list[str]) -> int:
         """Search for mods in the database and print their information."""
         if not args:
-            print("ERROR: no search pattern specified.", file=sys.stderr)
+            print_error("no search pattern specified.")
             return 1
 
         pattern = args[0]
@@ -479,10 +473,7 @@ class CelesteModCLI:
             found_mods = mod_source.search_mod_by_name(pattern)
         except Exception as e:
             logger.opt(exception=e).debug("Failed to load the local mod database.")
-            print(
-                f"ERROR: failed to load the local mod database: {e}",
-                file=sys.stderr,
-            )
+            print_error(f"failed to load the local mod database: {e}")
             return 1
         if not found_mods:
             print(f"No mods found.")
@@ -545,7 +536,7 @@ class CelesteModCLI:
         )
         options, _ = parser.parse_args(args)
         if options.max_depth <= 0:
-            print("ERROR: max depth must be a positive integer.", file=sys.stderr)
+            print_error("max depth must be a positive integer.")
             return 1
         scan_result = self._scan_installed_mods()
         if has_errors(scan_result.issues):
@@ -607,10 +598,9 @@ class CelesteModCLI:
                     f"{'[SKIP]':<{status_width}}  {mod.name:<{name_width}}  "
                     f"local={mod.version}  local hash unavailable"
                 )
-                print(
-                    f"WARNING: failed to calculate xxHash for mod '{mod.name}': "
-                    f"{entry.error}",
-                    file=sys.stderr,
+                print_warning(
+                    f"failed to calculate xxHash for mod '{mod.name}': "
+                    f"{entry.error}"
                 )
                 skipped_count += 1
                 continue
@@ -631,10 +621,11 @@ class CelesteModCLI:
                     version_warnings.append((mod, cur_mod_info))
 
         for mod, cur_mod_info in version_warnings:
-            print(
-                f"\033[93m{'[WARNING]':<{status_width}}\033[0m  "
-                f"{mod.name:<{name_width}}  local={mod.version}  "
-                f"database={cur_mod_info.version}; xxHash matches, treated as up to date"
+            print_warning_line(
+                f"{'[WARNING]':<{status_width}}  {mod.name:<{name_width}}  "
+                f"local={mod.version}  database={cur_mod_info.version}; "
+                "xxHash matches, treated as up to date",
+                file=sys.stdout,
             )
 
         print("-" * 72)
@@ -662,9 +653,7 @@ class CelesteModCLI:
             print("Successfully updated the local mod database.")
             return 0
         except Exception as e:
-            print(
-                f"ERROR: failed to update the local mod database: {e}", file=sys.stderr
-            )
+            print_error(f"failed to update the local mod database: {e}")
             return 1
 
     def apply(
@@ -718,27 +707,20 @@ class CelesteModCLI:
             show_help()
             return 0
         if positionals:
-            print(
-                f"ERROR: unexpected argument(s): {' '.join(positionals)}",
-                file=sys.stderr,
-            )
+            print_error(f"unexpected argument(s): {' '.join(positionals)}")
             return 1
 
         requirement_path = options.requirement or str(
             get_mods_dir() / "required_mods.txt"
         )
         if not os.path.isfile(requirement_path):
-            print(
-                f"ERROR: requirement file '{requirement_path}' not found.",
-                file=sys.stderr,
-            )
+            print_error(f"requirement file '{requirement_path}' not found.")
             return 1
 
         required_mods = mod_manager.parse_required_mods_file(requirement_path)
         if not required_mods:
-            print(
-                f"ERROR: requirement file '{requirement_path}' does not declare any mods.",
-                file=sys.stderr,
+            print_error(
+                f"requirement file '{requirement_path}' does not declare any mods."
             )
             return 1
 
@@ -758,8 +740,8 @@ class CelesteModCLI:
         if plan.status == mod_manager.ApplyPlanStatus.FAILED:
             if plan.downloaded:
                 print(
-                    "WARNING: apply did not update generated state files; the "
-                    "following verified downloads remain installed but were not enabled:",
+                    "The following mods were newly downloaded and verified during "
+                    "this apply and remain installed in Mods/:",
                     file=sys.stderr,
                 )
                 for mod in sorted(plan.downloaded, key=lambda mod: mod.name.casefold()):
@@ -767,10 +749,11 @@ class CelesteModCLI:
                         f"  - {mod.name} (v{mod.version}) [{mod.get_filename()}]",
                         file=sys.stderr,
                     )
+            print_error("apply failed; generated state files were not updated.")
             return 1
 
         if not options.dry_run and not mod_manager.apply_required_mods(plan):
-            print("ERROR: failed to write generated mod state files.", file=sys.stderr)
+            print_error("failed to write generated mod state files.")
             return 1
 
         print(
@@ -809,10 +792,7 @@ class CelesteModCLI:
         parser = optparse.OptionParser(prog=prog_name)
         _, positionals = parser.parse_args(list(args))
         if positionals:
-            print(
-                f"ERROR: unexpected argument(s): {' '.join(positionals)}",
-                file=sys.stderr,
-            )
+            print_error(f"unexpected argument(s): {' '.join(positionals)}")
             return 1
 
         scan_result = self._scan_installed_mods()
@@ -837,7 +817,7 @@ class CelesteModCLI:
             print("Successfully deleted mods.")
             return 0
 
-        print("ERROR: failed to delete mods.", file=sys.stderr)
+        print_error("failed to delete mods.")
         return 1
 
     def _upgrade_mod(
@@ -903,10 +883,9 @@ class CelesteModCLI:
 
         for entry in entries:
             if entry.status == _UpdateCheckStatus.LOCAL_HASH_UNAVAILABLE:
-                print(
-                    f"WARNING: failed to calculate xxHash for mod "
-                    f"'{entry.mod.name}': {entry.error}",
-                    file=sys.stderr,
+                print_warning(
+                    f"failed to calculate xxHash for mod "
+                    f"'{entry.mod.name}': {entry.error}"
                 )
 
         outdated_entries = [
@@ -950,10 +929,10 @@ class CelesteModCLI:
         )
         _, positionals = parser.parse_args(args)
         if len(positionals) == 0:
-            print("ERROR: no mod specified to update.", file=sys.stderr)
+            print_error("no mod specified to update.")
             return 1
         if "ALL" in positionals and positionals != ["ALL"]:
-            print("ERROR: ALL must be the only argument to upgrade.", file=sys.stderr)
+            print_error("ALL must be the only argument to upgrade.")
             return 1
         if positionals == ["ALL"]:
             return self._upgrade_all()
@@ -970,9 +949,9 @@ class CelesteModCLI:
         for mod_name in positionals:
             mod = self._get_installed_mod_by_name(mod_name, scan_result.mods)
             if not mod:
-                print(
-                    f"ERROR: mod '{mod_name}' is not installed. Cannot update a mod that is not installed.",
-                    file=sys.stderr,
+                print_error(
+                    f"mod '{mod_name}' is not installed. "
+                    "Cannot update a mod that is not installed."
                 )
                 exit_code = 1
                 continue

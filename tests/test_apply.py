@@ -252,12 +252,14 @@ def test_apply_aggregates_failures_and_reports_retained_downloads(
     )
     requirement_path = mods_dir / "requirements.txt"
     requirement_path.write_text(
-        "MissingRoot\nNetworkRoot\nExistingRoot\nCachedRoot\n",
+        "MissingRoot\nNetworkRoot\nExistingRoot\nZebraRoot\nCachedRoot\n",
         encoding="utf-8",
     )
+    (mods_dir / "blacklist.txt").write_text("Old.zip\n", encoding="utf-8")
+    (mods_dir / "modoptionsorder.txt").write_text("OldOrder.zip\n", encoding="utf-8")
 
     def fake_get_mod_info(mod_name):
-        if mod_name in {"NetworkRoot", "CachedRoot"}:
+        if mod_name in {"NetworkRoot", "CachedRoot", "ZebraRoot"}:
             return _mod_info(mod_name)
         return None
 
@@ -276,10 +278,9 @@ def test_apply_aggregates_failures_and_reports_retained_downloads(
                     )
                 ]
             )
-        mod_zip_factory(mods_dir, "CachedRoot.zip", "CachedRoot")
-        return mod_manager.DownloadResult(
-            mod=mod_manager.Mod.from_filename("CachedRoot.zip")
-        )
+        filename = f"{mod_info.name}.zip"
+        mod_zip_factory(mods_dir, filename, mod_info.name)
+        return mod_manager.DownloadResult(mod=mod_manager.Mod.from_filename(filename))
 
     monkeypatch.setattr(mod_manager, "get_mod_info", fake_get_mod_info)
     monkeypatch.setattr(mod_manager, "_download_mod", fake_download_mod)
@@ -293,12 +294,48 @@ def test_apply_aggregates_failures_and_reports_retained_downloads(
     )
     assert "failed to download mod 'NetworkRoot' after 3 attempts" in captured.err
     assert "failed to build apply plan" not in captured.err
-    assert (
-        "following verified downloads remain installed but were not enabled"
-        in captured.err
+    global_error = "ERROR: apply failed; generated state files were not updated."
+    downloaded_heading = (
+        "The following mods were newly downloaded and verified during this apply "
+        "and remain installed in Mods/:"
     )
+    assert downloaded_heading in captured.err
+    assert "were not enabled" not in captured.err
     assert "CachedRoot (v1.0.0) [CachedRoot.zip]" in captured.err
+    assert "ZebraRoot (v1.0.0) [ZebraRoot.zip]" in captured.err
+    assert "  - ExistingRoot" not in captured.err
+    assert (
+        captured.err.index("failed to download mod 'NetworkRoot'")
+        < captured.err.index(downloaded_heading)
+        < captured.err.index("  - CachedRoot")
+        < captured.err.index("  - ZebraRoot")
+        < captured.err.index(global_error)
+    )
+    assert captured.err.count(global_error) == 1
+    assert captured.err.endswith(f"{global_error}\n")
     assert (mods_dir / "CachedRoot.zip").exists()
+    assert (mods_dir / "ZebraRoot.zip").exists()
+    assert (mods_dir / "blacklist.txt").read_text(encoding="utf-8") == "Old.zip\n"
+    assert (mods_dir / "modoptionsorder.txt").read_text(
+        encoding="utf-8"
+    ) == "OldOrder.zip\n"
+
+
+def test_apply_failure_without_downloads_reports_global_error_without_empty_list(
+    mods_dir: Path, monkeypatch, capsys
+):
+    requirement_path = mods_dir / "requirements.txt"
+    requirement_path.write_text("MissingRoot\n", encoding="utf-8")
+    monkeypatch.setattr(mod_manager, "get_mod_info", lambda _name: None)
+
+    assert CelesteModCLI().apply(["-r", str(requirement_path)]) == 1
+
+    captured = capsys.readouterr()
+    assert "mod 'MissingRoot' was not found in the database" in captured.err
+    global_error = "ERROR: apply failed; generated state files were not updated."
+    assert captured.err.count(global_error) == 1
+    assert captured.err.endswith(f"{global_error}\n")
+    assert "The following mods were newly downloaded" not in captured.err
     assert not (mods_dir / "blacklist.txt").exists()
     assert not (mods_dir / "modoptionsorder.txt").exists()
 

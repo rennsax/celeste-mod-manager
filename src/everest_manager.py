@@ -21,6 +21,7 @@ from pathlib import Path, PurePosixPath
 from loguru import logger
 
 from .mod_manager import _download_progress, _format_size
+from .output import print_warning
 
 EVEREST_VERSIONS_URL = "https://maddie480.ovh/celeste/everest-versions"
 EVEREST_VERSIONS_MIRROR_URL = (
@@ -387,10 +388,9 @@ def _github_release_sha256(build: EverestBuild) -> str | None:
         release = _download_json(api_url)
     except Exception as e:
         logger.opt(exception=e).debug("Failed to load GitHub release digest.")
-        print(
-            "WARNING: could not retrieve the published SHA-256 digest; "
-            "continuing with archive and embedded-version validation.",
-            file=sys.stderr,
+        print_warning(
+            "could not retrieve the published SHA-256 digest; "
+            "continuing with archive and embedded-version validation."
         )
         return None
 

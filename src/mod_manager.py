@@ -18,6 +18,7 @@ from . import mod_source
 from .mod import Mod
 from .mod_source import ModInfo, get_mod_info
 from .operation import IssueKind, IssueSeverity, OperationIssue, has_errors
+from .output import print_warning
 from .path import get_mods_dir
 
 _DOWNLOAD_MAX_ATTEMPTS = 3
@@ -973,11 +974,10 @@ def _warn_about_optional_dependency_cycles(
         if not _is_cyclic_component(component, graph):
             continue
         members = ", ".join(component)
-        print(
-            "WARNING: optional dependency cycle detected among: "
+        print_warning(
+            "optional dependency cycle detected among: "
             f"{members}. Continuing because Everest permits cycles involving "
-            "optional dependencies.",
-            file=sys.stderr,
+            "optional dependencies."
         )
 
 
